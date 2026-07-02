@@ -1,0 +1,30 @@
+[package]
+name         = "synchronizer"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.89"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/LiGoldragon/synchronizer"
+description  = "Meta-repo version propagation: cascades dependency bumps across component repositories so wire contracts stay aligned."
+publish      = false
+
+[lib]
+name = "synchronizer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synchronizer"
+path = "src/main.rs"
+
+[dependencies]
+nota       = { package = "nota", git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror  = "2"
+toml       = "0.8"
+winnow     = "0.7"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused      = { level = "warn", priority = -1 }
+dead_code   = { level = "warn", priority = -1 }

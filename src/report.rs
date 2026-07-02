@@ -4,13 +4,15 @@
 //! results, and every collected failure — together at the end, per the
 //! keep-going rule. Encoding goes through the canonical NOTA codec only.
 //!
-//! Schema (strict positional; see ARCHITECTURE.md §10):
+//! Schema (strict positional; the root record is an untagged struct per
+//! the canonical codec — the `SynchronizerReport` label in ARCHITECTURE.md
+//! §10 is schema documentation, not a wire tag):
 //!
 //! ```nota
-//! (SynchronizerReport <started-at> <finished-at> [<level-outcome>] [<failure>])
+//! (<started-at> <finished-at> [<level-outcome>] [<failure>])
 //! ```
 
-use nota::{NotaDecode, NotaEncode};
+use nota::{NotaDecode, NotaEncode, NotaSource};
 
 use crate::error::Error;
 use crate::topology::PinLayer;
@@ -26,15 +28,47 @@ pub struct SynchronizerReport {
 }
 
 impl SynchronizerReport {
+    pub fn new(
+        started_at: Timestamp,
+        finished_at: Timestamp,
+        levels: Vec<LevelOutcome>,
+        failures: Vec<Failure>,
+    ) -> Self {
+        Self {
+            started_at,
+            finished_at,
+            levels,
+            failures,
+        }
+    }
+
     /// Render the report as canonical NOTA text.
     pub fn to_nota_text(&self) -> Result<String, Error> {
-        todo!("encode through the canonical nota codec")
+        Ok(format!("{}\n", self.to_nota()))
+    }
+
+    /// Decode a report from canonical NOTA text (round-trip witness
+    /// surface).
+    pub fn from_nota_text(text: &str) -> Result<Self, Error> {
+        NotaSource::new(text)
+            .parse::<Self>()
+            .map_err(|error| Error::ConfigurationDecode {
+                detail: error.to_string(),
+            })
+    }
+
+    pub fn levels(&self) -> &[LevelOutcome] {
+        &self.levels
+    }
+
+    pub fn failures(&self) -> &[Failure] {
+        &self.failures
     }
 
     /// Whether the run collected any failure — drives the process exit
     /// code.
     pub fn has_failures(&self) -> bool {
-        todo!()
+        !self.failures.is_empty()
     }
 }
 
@@ -45,12 +79,51 @@ pub struct LevelOutcome {
     repositories: Vec<RepositoryOutcome>,
 }
 
+impl LevelOutcome {
+    pub fn new(index: u32, repositories: Vec<RepositoryOutcome>) -> Self {
+        Self {
+            index,
+            repositories,
+        }
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub fn repositories(&self) -> &[RepositoryOutcome] {
+        &self.repositories
+    }
+}
+
 /// What happened to one repository this run.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct RepositoryOutcome {
     component: ComponentName,
     action: Action,
     verification: Verification,
+}
+
+impl RepositoryOutcome {
+    pub fn new(component: ComponentName, action: Action, verification: Verification) -> Self {
+        Self {
+            component,
+            action,
+            verification,
+        }
+    }
+
+    pub fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    pub fn verification(&self) -> &Verification {
+        &self.verification
+    }
 }
 
 /// The bump action taken for one repository.
@@ -71,6 +144,20 @@ pub struct BumpRecord {
     pushed: PushedBranch,
 }
 
+impl BumpRecord {
+    pub fn new(applied: Vec<AppliedBump>, pushed: PushedBranch) -> Self {
+        Self { applied, pushed }
+    }
+
+    pub fn applied(&self) -> &[AppliedBump] {
+        &self.applied
+    }
+
+    pub fn pushed(&self) -> &PushedBranch {
+        &self.pushed
+    }
+}
+
 /// One pin movement in one layer.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct AppliedBump {
@@ -78,6 +165,38 @@ pub struct AppliedBump {
     layer: PinLayer,
     previous: PinValue,
     next: PinValue,
+}
+
+impl AppliedBump {
+    pub fn new(
+        dependency: ComponentName,
+        layer: PinLayer,
+        previous: PinValue,
+        next: PinValue,
+    ) -> Self {
+        Self {
+            dependency,
+            layer,
+            previous,
+            next,
+        }
+    }
+
+    pub fn dependency(&self) -> &ComponentName {
+        &self.dependency
+    }
+
+    pub fn layer(&self) -> PinLayer {
+        self.layer
+    }
+
+    pub fn previous(&self) -> &PinValue {
+        &self.previous
+    }
+
+    pub fn next(&self) -> &PinValue {
+        &self.next
+    }
 }
 
 /// A pin value as it appears in a manifest or lock: an exact revision
@@ -93,6 +212,20 @@ pub enum PinValue {
 pub struct PushedBranch {
     branch: BranchName,
     tip: CommitIdentifier,
+}
+
+impl PushedBranch {
+    pub fn new(branch: BranchName, tip: CommitIdentifier) -> Self {
+        Self { branch, tip }
+    }
+
+    pub fn branch(&self) -> &BranchName {
+        &self.branch
+    }
+
+    pub fn tip(&self) -> &CommitIdentifier {
+        &self.tip
+    }
 }
 
 /// The verify result for one repository.
@@ -115,6 +248,28 @@ pub struct Failure {
     detail: FailureDetail,
 }
 
+impl Failure {
+    pub fn new(component: ComponentName, stage: FailureStage, detail: FailureDetail) -> Self {
+        Self {
+            component,
+            stage,
+            detail,
+        }
+    }
+
+    pub fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
+    pub fn stage(&self) -> FailureStage {
+        self.stage
+    }
+
+    pub fn detail(&self) -> &FailureDetail {
+        &self.detail
+    }
+}
+
 /// Where in the per-repository pipeline a failure happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub enum FailureStage {
@@ -130,11 +285,15 @@ pub enum FailureStage {
 }
 
 /// Diagnostic text for one failure: a decode error or a command output
-/// excerpt. Carried as NOTA pipe text in the rendered report.
+/// excerpt. Carried as NOTA text in the rendered report.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct FailureDetail(String);
 
 impl FailureDetail {
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self(detail.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

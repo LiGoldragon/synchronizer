@@ -29,6 +29,10 @@ pub enum Error {
     #[error("unknown component: {0:?}")]
     UnknownComponent(ComponentName),
 
+    /// A remote URL did not parse as `scheme://host/owner/repository`.
+    #[error("repository url unparseable: {url}")]
+    RepositoryUrlUnparseable { url: String },
+
     /// A pin surface failed typed deserialization (serde for TOML and JSON,
     /// the URL parser for flake.nix input URLs).
     #[error("manifest decode: {component:?} {layer:?}: {detail}")]
@@ -79,6 +83,14 @@ pub enum Error {
     /// host.
     #[error("builder role {role:?} unresolved: {detail}")]
     RoleUnresolved { role: BuilderRole, detail: String },
+
+    /// The controlled transitive-lock fallback (`cargo update -p <package>
+    /// --precise <revision>`) failed to produce a refreshed lock.
+    #[error("transitive lock resolution for {component:?}: {detail}")]
+    TransitiveLockResolution {
+        component: ComponentName,
+        detail: String,
+    },
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

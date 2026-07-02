@@ -1,117 +1,353 @@
 //! Typed model of a component's `Cargo.toml`.
 //!
-//! Deserialized with serde through the TOML deserializer — never string
-//! munging. Tables the synchronizer does not manipulate are preserved as
-//! typed TOML values in `remainder` fields and reserialized untouched.
-//! Reserialization goes through [`crate::toml_pretty::PrettyPrinter`] and
-//! produces the canonical workspace manifest style; TOML comments are not
-//! preserved (see ARCHITECTURE.md §4 and §14).
+//! Reading goes through serde and the TOML deserializer — the read model
+//! feeds topology discovery and staleness. Writing goes through the
+//! format-preserving document ([`crate::toml_document::PreservedTomlDocument`],
+//! psyche-locked): the cascade redirect edits exactly one dependency value
+//! and leaves every comment and layout byte untouched.
 //!
 //! Field names follow the external Cargo format at the serde boundary.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use toml::Table;
 
 use crate::error::Error;
-use crate::toml_pretty::PrettyPrinter;
-use crate::types::{BranchName, CommitIdentifier, RepositoryUrl, TomlText};
+use crate::toml_document::PreservedTomlDocument;
+use crate::topology::PinLayer;
+use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl, TomlText};
 
 /// A dependency key in a Cargo dependency table. This is a *package* name,
-/// which may differ from the repository name (`nota` lives in `nota-next`);
+/// which may differ from the repository name (`nota-next` publishes `nota`);
 /// component matching goes through the git URL, never this name.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub struct DependencyName(String);
 
 impl DependencyName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// A `Cargo.toml` document.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The three dependency tables a manifest may hold, in external spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyTableKind {
+    Dependencies,
+    BuildDependencies,
+    DevelopmentDependencies,
+}
+
+impl DependencyTableKind {
+    pub const ALL: [Self; 3] = [
+        Self::Dependencies,
+        Self::BuildDependencies,
+        Self::DevelopmentDependencies,
+    ];
+
+    /// The external table key in `Cargo.toml`.
+    pub fn table_key(&self) -> &'static str {
+        match self {
+            Self::Dependencies => "dependencies",
+            Self::BuildDependencies => "build-dependencies",
+            Self::DevelopmentDependencies => "dev-dependencies",
+        }
+    }
+}
+
+/// A `Cargo.toml` document: the serde read model plus the
+/// format-preserving write document, parsed from the same text.
+#[derive(Debug, Clone)]
 pub struct CargoManifest {
-    package: PackageSection,
-    #[serde(default)]
-    dependencies: DependencyTable,
-    #[serde(default, rename = "build-dependencies")]
-    build_dependencies: DependencyTable,
-    #[serde(default, rename = "dev-dependencies")]
-    development_dependencies: DependencyTable,
-    /// Every table this tool does not manipulate ([lib], [[bin]], [lints],
-    /// [features], [patch], target tables, ...), preserved as typed TOML
-    /// values.
-    #[serde(flatten)]
-    remainder: Table,
+    component: ComponentName,
+    read: CargoManifestModel,
+    document: PreservedTomlDocument,
 }
 
 impl CargoManifest {
     /// Deserialize a manifest from TOML text.
-    pub fn from_toml_text(text: &str) -> Result<Self, Error> {
-        todo!("toml deserializer via serde")
+    pub fn from_toml_text(text: &str, component: &ComponentName) -> Result<Self, Error> {
+        let read: CargoManifestModel =
+            toml::from_str(text).map_err(|error| Error::ManifestDecode {
+                component: component.clone(),
+                layer: PinLayer::CargoManifest,
+                detail: error.to_string(),
+            })?;
+        let document = PreservedTomlDocument::parse(text, component, PinLayer::CargoManifest)?;
+        Ok(Self {
+            component: component.clone(),
+            read,
+            document,
+        })
     }
 
-    /// The `[package] name` value.
-    pub fn package_name(&self) -> &DependencyName {
-        todo!()
+    /// The `[package] name` value, `None` for a virtual workspace manifest.
+    pub fn package_name(&self) -> Option<&DependencyName> {
+        self.read.package.as_ref().map(|package| &package.name)
     }
 
-    /// The `[package] version` value.
-    pub fn package_version(&self) -> &PackageVersion {
-        todo!()
+    /// The `[package] version` value, `None` for a virtual workspace
+    /// manifest or a version inherited from a workspace.
+    pub fn package_version(&self) -> Option<&PackageVersion> {
+        self.read
+            .package
+            .as_ref()
+            .and_then(|package| package.version.as_ref())
     }
 
     /// Every git dependency across the dependency, build-dependency, and
     /// dev-dependency tables. Topology discovery matches these against the
     /// configured component set by repository URL.
     pub fn git_dependencies(&self) -> Vec<(DependencyName, GitSource)> {
-        todo!()
+        DependencyTableKind::ALL
+            .iter()
+            .flat_map(|kind| self.read.table(*kind).git_entries())
+            .collect()
     }
 
-    /// Redirect the named git dependency to `reference` in-type, returning
-    /// the previous reference.
+    /// Redirect the named git dependency to `reference` in the
+    /// format-preserving document, returning the previous reference.
     ///
     /// This is the cascade edit: a consumer pinning a bumped dependency is
     /// redirected from `branch = "main"` to `branch = "synchronizer"` so
-    /// Cargo can reach the locked revision on a fresh clone.
+    /// Cargo can reach the locked revision on a fresh clone. Comments and
+    /// layout survive: only the one value changes.
     pub fn redirect_git_dependency(
         &mut self,
         name: &DependencyName,
         reference: GitReference,
     ) -> Result<GitReference, Error> {
-        todo!()
+        let (kind, previous) = self
+            .git_dependencies_with_tables()
+            .into_iter()
+            .find(|(_, entry_name, _)| entry_name == name)
+            .map(|(kind, _, source)| (kind, source.reference))
+            .ok_or_else(|| Error::NotComponentDependency {
+                consumer: self.component.clone(),
+                dependency: name.as_str().to_string(),
+            })?;
+        let branch = match &reference {
+            GitReference::Branch(branch) => branch.as_str().to_string(),
+            other => {
+                return Err(Error::ManifestEncode {
+                    component: self.component.clone(),
+                    layer: PinLayer::CargoManifest,
+                    detail: format!("cascade redirect requires a branch reference, got {other:?}"),
+                });
+            }
+        };
+        let document = self.document.as_document_mut();
+        let entry = document
+            .get_mut(kind.table_key())
+            .and_then(|table| table.get_mut(name.as_str()))
+            .ok_or_else(|| Error::ManifestEncode {
+                component: self.component.clone(),
+                layer: PinLayer::CargoManifest,
+                detail: format!("dependency {} not found in document", name.as_str()),
+            })?;
+        match entry {
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+                table.insert("branch", toml_edit::Value::from(branch));
+            }
+            toml_edit::Item::Table(table) => {
+                table.insert("branch", toml_edit::value(branch));
+            }
+            other => {
+                return Err(Error::ManifestEncode {
+                    component: self.component.clone(),
+                    layer: PinLayer::CargoManifest,
+                    detail: format!(
+                        "dependency {} is not a table entry: {other:?}",
+                        name.as_str()
+                    ),
+                });
+            }
+        }
+        // Keep the read model coherent with the document.
+        self.read
+            .table_mut(kind)
+            .set_branch(name, reference.clone());
+        Ok(previous)
     }
 
-    /// Reserialize through the pretty printer in the canonical workspace
-    /// manifest style.
-    pub fn to_pretty_toml(&self, printer: &PrettyPrinter) -> Result<TomlText, Error> {
-        todo!()
+    /// The document text with all edits applied, preserving comments and
+    /// layout of everything untouched.
+    pub fn to_toml_text(&self) -> TomlText {
+        self.document.to_toml_text()
+    }
+
+    /// Every dependency package name this manifest declares across the
+    /// dependency and build-dependency tables (the sets a consumer's lock
+    /// records for this package), with `package =` renames applied.
+    /// Dev-dependencies stay out: a consumer's lock never records them for
+    /// a dependency.
+    pub fn declared_dependency_package_names(&self) -> Vec<DependencyName> {
+        [
+            DependencyTableKind::Dependencies,
+            DependencyTableKind::BuildDependencies,
+        ]
+        .iter()
+        .flat_map(|kind| self.read.table(*kind).package_names())
+        .collect()
+    }
+
+    fn git_dependencies_with_tables(
+        &self,
+    ) -> Vec<(DependencyTableKind, DependencyName, GitSource)> {
+        DependencyTableKind::ALL
+            .iter()
+            .flat_map(|kind| {
+                self.read
+                    .table(*kind)
+                    .git_entries()
+                    .into_iter()
+                    .map(move |(name, source)| (*kind, name, source))
+            })
+            .collect()
+    }
+}
+
+/// The serde read model of a manifest.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct CargoManifestModel {
+    #[serde(default)]
+    package: Option<PackageSection>,
+    #[serde(default)]
+    dependencies: DependencyTable,
+    #[serde(default, rename = "build-dependencies")]
+    build_dependencies: DependencyTable,
+    #[serde(default, rename = "dev-dependencies")]
+    development_dependencies: DependencyTable,
+    /// Every table this tool does not read ([lib], [[bin]], [lints],
+    /// [features], [workspace], target tables, ...), preserved as typed
+    /// TOML values for completeness of the read model.
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    remainder: Table,
+}
+
+impl CargoManifestModel {
+    fn table(&self, kind: DependencyTableKind) -> &DependencyTable {
+        match kind {
+            DependencyTableKind::Dependencies => &self.dependencies,
+            DependencyTableKind::BuildDependencies => &self.build_dependencies,
+            DependencyTableKind::DevelopmentDependencies => &self.development_dependencies,
+        }
+    }
+
+    fn table_mut(&mut self, kind: DependencyTableKind) -> &mut DependencyTable {
+        match kind {
+            DependencyTableKind::Dependencies => &mut self.dependencies,
+            DependencyTableKind::BuildDependencies => &mut self.build_dependencies,
+            DependencyTableKind::DevelopmentDependencies => &mut self.development_dependencies,
+        }
     }
 }
 
 /// The `[package]` table. Fields the tool reads are typed; the rest is
-/// preserved.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PackageSection {
+/// ignored by the read model (the write document preserves everything).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct PackageSection {
     name: DependencyName,
-    version: PackageVersion,
-    #[serde(flatten)]
-    remainder: Table,
+    /// Missing or non-string (`version.workspace = true`) versions decode
+    /// as `None`.
+    #[serde(default)]
+    version: Option<PackageVersion>,
 }
 
 /// A Cargo package version string, e.g. `0.2.0`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PackageVersion(String);
 
 impl PackageVersion {
+    pub fn new(version: impl Into<String>) -> Self {
+        Self(version.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 /// One `[dependencies]`-shaped table, in declaration order.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct DependencyTable(Table);
+
+impl DependencyTable {
+    /// The git-sourced entries of this table: dependency key (with a
+    /// `package =` rename applied as the resolved package name) and parsed
+    /// git source.
+    fn git_entries(&self) -> Vec<(DependencyName, GitSource)> {
+        self.0
+            .iter()
+            .filter_map(|(key, value)| {
+                let table = value.as_table()?;
+                let url = table.get("git")?.as_str()?;
+                let package = table
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                let reference = if let Some(branch) = table.get("branch").and_then(|v| v.as_str()) {
+                    GitReference::Branch(BranchName::new(branch))
+                } else if let Some(tag) = table.get("tag").and_then(|v| v.as_str()) {
+                    GitReference::Tag(tag.to_string())
+                } else if let Some(revision) = table.get("rev").and_then(|v| v.as_str()) {
+                    GitReference::Revision(CommitIdentifier::new(revision))
+                } else {
+                    GitReference::DefaultBranch
+                };
+                Some((
+                    DependencyName::new(package),
+                    GitSource {
+                        url: RepositoryUrl::new(url),
+                        reference,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Every dependency package name in this table: plain-version entries
+    /// keep their key, table entries apply a `package =` rename.
+    fn package_names(&self) -> Vec<DependencyName> {
+        self.0
+            .iter()
+            .map(|(key, value)| {
+                let package = value
+                    .as_table()
+                    .and_then(|table| table.get("package"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                DependencyName::new(package)
+            })
+            .collect()
+    }
+
+    fn set_branch(&mut self, name: &DependencyName, reference: GitReference) {
+        if let GitReference::Branch(branch) = reference {
+            for (key, value) in self.0.iter_mut() {
+                let is_entry = {
+                    let Some(table) = value.as_table() else {
+                        continue;
+                    };
+                    let package = table
+                        .get("package")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(key);
+                    table.contains_key("git") && package == name.as_str()
+                };
+                if is_entry && let Some(table) = value.as_table_mut() {
+                    table.insert(
+                        "branch".to_string(),
+                        toml::Value::String(branch.as_str().to_string()),
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// A parsed view of one dependency entry's git source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +357,10 @@ pub struct GitSource {
 }
 
 impl GitSource {
+    pub fn new(url: RepositoryUrl, reference: GitReference) -> Self {
+        Self { url, reference }
+    }
+
     pub fn url(&self) -> &RepositoryUrl {
         &self.url
     }
@@ -130,9 +370,14 @@ impl GitSource {
     }
 }
 
-/// How a git dependency names the commit it follows.
+/// How a git dependency names the commit it follows. Mirrors the reference
+/// query of Cargo's git source grammar (`?branch=`, `?tag=`, `?rev=`, or no
+/// query for the remote default branch).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitReference {
+    /// No branch, tag, or rev declared: the remote's default branch.
+    DefaultBranch,
     Branch(BranchName),
+    Tag(String),
     Revision(CommitIdentifier),
 }

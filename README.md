@@ -6,16 +6,21 @@ synchronizer discovers the dependency DAG from the manifests, computes
 what is stale, and cascades the bumps upward from the leaves so the
 component tree stays aligned.
 
-Per repository it edits both pin layers as typed data (Cargo.toml +
-Cargo.lock via serde; flake.lock as typed JSON, narHash prefetched
-through nix), commits and pushes a tool-owned `synchronizer` branch —
-never `main` — build-verifies each bump on a role-resolved builder host,
-keeps going on failure, and reports the whole run as one NOTA document.
+Per repository it edits both pin layers as typed, format-preserving data
+(Cargo.toml + Cargo.lock through a comment-preserving TOML document, serde
+for reading; flake.lock as typed JSON, narHash prefetched through nix),
+builds each bump commit at the git-object level — no working copy is
+touched — and pushes a tool-owned `synchronizer` branch, never `main`.
+Each pushed bump is verified on a role-resolved builder host with the
+repository's wire-exercising flake checks (the daemon-launching class that
+catches runtime wire skew), falling back to the default `nix build` where
+a repo has none. Failures are collected, never fatal; the whole run is
+reported as one NOTA document.
 
 Entrypoint:
 
 - `synchronizer <configuration.nota>` — one NOTA configuration file in,
-  one NOTA report out.
+  one NOTA report out; exit 1 when the report carries failures.
 
-Status: design + scaffold. `ARCHITECTURE.md` is the design document
-pending psyche sign-off; module bodies are unimplemented.
+Status: implemented against the psyche-signed `ARCHITECTURE.md`; not yet
+run against live component repositories.

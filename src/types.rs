@@ -4,8 +4,12 @@
 //! never crosses a module boundary.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nota::{NotaDecode, NotaEncode};
+use winnow::Parser;
+use winnow::combinator::opt;
+use winnow::token::take_while;
 
 /// Name of a participating component repository. Matches the GitHub
 /// repository name exactly, e.g. `signal-router`.
@@ -38,6 +42,13 @@ impl CommitIdentifier {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this text has the shape of a full git object id. Used by the
+    /// flake.nix URL scanner to distinguish a revision pin segment from a
+    /// branch or tag reference.
+    pub fn is_full_object_id(text: &str) -> bool {
+        text.len() == 40 && text.chars().all(|character| character.is_ascii_hexdigit())
+    }
 }
 
 /// A git branch name.
@@ -58,6 +69,10 @@ impl BranchName {
         Self("main".to_string())
     }
 
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -76,19 +91,71 @@ impl RepositoryUrl {
         &self.0
     }
 
-    /// The repository name segment of the URL, used to match a git
-    /// dependency against the configured component set.
+    /// The owner/repository identity of the URL, used to match a git
+    /// dependency or flake input against the configured component set.
+    /// Package and input names never participate in matching.
+    pub fn repository_identity(&self) -> Result<RepositoryIdentity, crate::Error> {
+        let mut input = self.0.as_str();
+        RepositoryIdentity::parse(&mut input).map_err(|_| crate::Error::RepositoryUrlUnparseable {
+            url: self.0.clone(),
+        })
+    }
+
+    /// The repository name segment of the URL.
     pub fn repository_name(&self) -> Result<ComponentName, crate::Error> {
-        todo!("parse the trailing owner/repo segment; strip a `.git` suffix")
+        Ok(self.repository_identity()?.repository)
+    }
+}
+
+/// The owner and repository name a remote URL points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryIdentity {
+    pub owner: String,
+    pub repository: ComponentName,
+}
+
+impl RepositoryIdentity {
+    /// Winnow grammar over the repository-URL shapes this workspace uses:
+    /// `https://<host>/<owner>/<repository>(.git)?` and
+    /// `ssh://git@<host>/<owner>/<repository>(.git)?`. The identity is the
+    /// final two path segments.
+    fn parse(input: &mut &str) -> winnow::Result<Self> {
+        let scheme = take_while(1.., |character: char| {
+            character.is_ascii_alphanumeric() || character == '+'
+        });
+        let separator = "://";
+        let segment = || take_while(1.., |character: char| character != '/' && character != '?');
+        let (_, _, _, _, owner, _, repository) = (
+            scheme,
+            separator,
+            segment(), // host, possibly with a user@ prefix
+            '/',
+            segment(),
+            '/',
+            take_while(1.., |character: char| character != '/' && character != '?'),
+        )
+            .parse_next(input)?;
+        let _ = opt('/').parse_next(input)?;
+        let repository = repository.strip_suffix(".git").unwrap_or(repository);
+        Ok(Self {
+            owner: owner.to_string(),
+            repository: ComponentName::new(repository),
+        })
     }
 }
 
 /// A CriomOS role name naming the build-verify host indirectly,
-/// e.g. `Builder`. The tool never holds a hostname of its own.
+/// e.g. `NixBuilder`. The tool never holds a hostname of its own; the role
+/// atom is matched against the service kinds the cluster proposal authors
+/// per node.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct BuilderRole(String);
 
 impl BuilderRole {
+    pub fn new(role: impl Into<String>) -> Self {
+        Self(role.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -101,16 +168,24 @@ impl BuilderRole {
 pub struct BuilderHost(String);
 
 impl BuilderHost {
+    pub fn new(host: impl Into<String>) -> Self {
+        Self(host.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// A flake reference such as `github:LiGoldragon/CriomOS-test-cluster`.
+/// A flake reference such as `github:LiGoldragon/signal-frame/<revision>`.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct FlakeReference(String);
 
 impl FlakeReference {
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self(reference.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -130,7 +205,7 @@ impl NarHash {
     }
 }
 
-/// Rendered TOML text produced by the pretty printer.
+/// Rendered TOML text produced by a format-preserving document edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TomlText(String);
 
@@ -149,6 +224,10 @@ impl TomlText {
 pub struct AbsolutePath(String);
 
 impl AbsolutePath {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
     pub fn as_path_buffer(&self) -> PathBuf {
         PathBuf::from(&self.0)
     }
@@ -160,6 +239,13 @@ pub struct Timestamp(u64);
 
 impl Timestamp {
     pub fn now() -> Self {
-        todo!("system clock, unix seconds")
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before the unix epoch");
+        Self(elapsed.as_secs())
+    }
+
+    pub fn from_unix_seconds(seconds: u64) -> Self {
+        Self(seconds)
     }
 }

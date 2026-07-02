@@ -17,12 +17,18 @@ name = "synchronizer"
 path = "src/main.rs"
 
 [dependencies]
+gix        = { version = "0.85", features = ["tree-editor"] }
 nota       = { package = "nota", git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror  = "2"
 toml       = "0.8"
+toml_edit  = "0.22"
 winnow     = "0.7"
+
+[dev-dependencies]
+gix      = { version = "0.85", features = ["tree-editor"] }
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

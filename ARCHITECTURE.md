@@ -3,10 +3,11 @@
 *Meta-repo version propagation: cascade dependency bumps across the
 component tree so wire contracts stay aligned.*
 
-This document is the concrete design for psyche sign-off. Sections 1–13
-render the locked design; §14 lists the open questions the psyche should
-resolve before implementation. The repo is scaffold only: module stubs with
-typed signatures, no logic.
+This document is the psyche-signed design the implementation follows. The
+formerly open questions (§14 of the sign-off draft) are resolved and folded
+into their owning sections; two of those resolutions are psyche-locked and
+called out as such where they land (format-preserving manifest writes, §4;
+wire-exercising verify, §8).
 
 ## 0. Intent
 
@@ -78,19 +79,22 @@ The configuration names the participants and where their clones live. It
 never declares dependency edges (§5) and never names a host (§8). Decoding
 goes only through the canonical NOTA codec (Spirit record qvb3); the Rust
 schema in `src/configuration.rs` plus round-trip tests own the wire truth —
-the pseudo-NOTA here is documentation.
+the pseudo-NOTA here is documentation. The record names below label the
+schema; on the wire the root is an untagged positional struct record, per
+the codec's untagged-struct rule (a tag is an enum variant, and there is
+one payload shape here).
 
 ```nota
-;; SynchronizerConfig: root configuration document (strict positional).
-(SynchronizerConfig <forge> <checkout-root> [<component>] <builder-role> <cluster-configuration>)
+;; SynchronizerConfig: root configuration document (strict positional, untagged).
+(<forge> <checkout-root> [<component>] <builder-role> <cluster-configuration>)
 ;;   forge                : (GitHub <owner>) — forge account holding every component remote
 ;;   checkout-root        : absolute path holding local clones named after components
-;;   component            : (Component <name> <checkout>)
-;;   builder-role         : bare atom — CriomOS role of the build-verify host
-;;   cluster-configuration: (ClusterFlake <flake-reference>) — where roles resolve to hosts
+;;   component            : (<name> <checkout>) — untagged Component record
+;;   builder-role         : bare atom — CriomOS role of the build-verify host, e.g. NixBuilder
+;;   cluster-configuration: (ClusterProposal <absolute-path>) — where roles resolve to hosts
 
-;; Component: one participating repository.
-(Component <name> <checkout>)
+;; Component: one participating repository (untagged).
+(<name> <checkout>)
 ;;   name    : bare atom — the GitHub repository name, e.g. signal-router
 ;;   checkout: AtRoot | (AtPath <absolute-path>)
 ;;     AtRoot   — the clone lives at <checkout-root>/<name> (ghq-style layout)
@@ -100,15 +104,14 @@ the pseudo-NOTA here is documentation.
 Example:
 
 ```nota
-(SynchronizerConfig
-  (GitHub LiGoldragon)
-  /git/github.com/LiGoldragon
-  [(Component signal-frame AtRoot)
-   (Component signal-router AtRoot)
-   (Component signal-harness AtRoot)
-   (Component introspect AtRoot)]
-  Builder
-  (ClusterFlake [github:LiGoldragon/CriomOS-test-cluster]))
+((GitHub LiGoldragon)
+ /git/github.com/LiGoldragon
+ [(signal-frame AtRoot)
+  (signal-router AtRoot)
+  (signal-harness AtRoot)
+  (introspect AtRoot)]
+ NixBuilder
+ (ClusterProposal /git/github.com/LiGoldragon/goldragon/datom.nota))
 ```
 
 Notes:
@@ -119,8 +122,9 @@ Notes:
   variant — no optional in a positional slot.
 - The dedicated branch name `synchronizer` is a design constant, not
   configuration (`BranchName::synchronizer()`).
-- The `cluster-configuration` variant set is expected to firm up when the
-  concrete cluster surface is confirmed (§14 q5).
+- `(ClusterProposal <absolute-path>)` names the confirmed cluster surface:
+  the horizon-rs `ClusterProposal` datom (§8). Growth to other surfaces
+  happens by new variant.
 
 ## 4. Pin layers
 
@@ -129,36 +133,43 @@ each is a typed model:
 
 ### Cargo layer
 
+- **Format-preserving writes (psyche-locked).** Every TOML write goes
+  through a typed, format-preserving document
+  (`src/toml_document.rs`, `toml_edit::DocumentMut`): a bump changes
+  exactly the edited values and leaves every comment, alignment, and layout
+  byte untouched (spirit's `Cargo.toml` carries load-bearing comments).
+  Serde models remain the read surface for topology and staleness. Real
+  typed data, non-destructive — never string munging.
 - **`Cargo.toml`** (`src/cargo_manifest.rs`) — serde through the TOML
-  deserializer into `CargoManifest`; the dependency tables the tool
-  manipulates are typed, everything else is preserved as typed TOML values
-  (`#[serde(flatten)] remainder: toml::Table`) and reserialized untouched.
+  deserializer for reading; the format-preserving document for writing.
   In this workspace sibling dependencies are declared
   `{ git = "https://github.com/LiGoldragon/<repo>.git", branch = "main" }`,
   so the manifest changes **only** on a cascade pin: the dependency is
   redirected `branch = "main"` → `branch = "synchronizer"` so Cargo can
   reach the locked revision from a fresh clone (a rev locked off-branch is
   unreachable through a `branch = "main"` declaration).
-- **`Cargo.lock`** (`src/cargo_lock.rs`) — serde-typed `CargoLock`. A bump
-  sets the locked revision inside the parsed `source` pin (winnow parser
-  over the `git+<url>?<query>#<rev>` shape — never ad hoc splitting),
-  rewrites the reference query to match the manifest, and synchronizes the
-  recorded package `version` to what the dependency's own manifest declares
-  at the target revision (read through the dependency's object store, §7).
+- **`Cargo.lock`** (`src/cargo_lock.rs`) — serde-typed reading with a
+  winnow grammar over the `git+<url>?<query>#<rev>` source shape — never ad
+  hoc splitting. A bump sets the locked revision, rewrites the reference
+  query to match the manifest, and synchronizes the recorded package
+  `version` to what the dependency's own manifest declares at the target
+  revision (read through the dependency's object store, §7). The write is
+  the format-preserving document edit; Cargo's own rendering, `@generated`
+  header included, survives byte-for-byte outside the edited entries.
 - **Package name vs repository name.** A Cargo dependency key is a package
   name and may differ from the repository name (`nota` lives in
   `nota-next`). All component matching goes through the git URL's
   repository identity, never the package name.
-- **Pretty printing** (`src/toml_pretty.rs`) — reserialization goes through
-  `PrettyPrinter`, which owns the canonical output policy: the workspace
-  manifest style (aligned `=` within dependency tables) and Cargo's own
-  lock rendering including its `@generated` header. It renders typed TOML
-  values only; it never patches text it did not produce.
-- **Known consequences, for sign-off:** serde reserialization of a
-  `Cargo.toml` drops TOML comments (§14 q1), and a typed lock edit cannot
+- **Transitive gaps** (`src/transitive_lock.rs`) — a typed lock edit cannot
   invent new transitive entries when the dependency's own dependency set
-  changed at the target revision — build-verify catches that case and
-  reports it (§14 q2).
+  changed at the target revision. The accepted controlled fallback for
+  exactly that gap is `cargo update -p <package> --precise <revision>`,
+  run in a scratch materialization of the consumer's base tree (no working
+  copy is touched); the refreshed lock becomes the commit content. Gap
+  detection compares the producer's declared dependency names at the target
+  against the lock's recorded set (and triggers whenever the producer's
+  published version is unknowable from its root manifest). Build-verify
+  remains the final word on whatever the fallback cannot fix.
 
 ### Flake layer
 
@@ -242,11 +253,15 @@ run — and their own verifies surface the breakage as collected failures
 - The commit is pushed to the tool-owned **`synchronizer` branch**,
   overwriting whatever a previous run left there: the branch is staging
   surface owned by this tool, rebuilt from `main`-tip truth each run, so a
-  force update is the designed behavior (§14 q3). Nothing is ever pushed to
-  any other ref.
-- The plumbing behind this boundary (in-process `gix` vs shelling to git
-  plumbing) is an implementation choice inside the stated invariants
-  (§14 q4).
+  force update is the designed behavior. Merge-back to `main` is out of
+  scope. Nothing is ever pushed to any other ref.
+- Object operations are in-process **gix** (accepted default: typed git
+  library; blob/tree/commit built with no working copy). Transport —
+  ls-remote, fetch, force-push of the synchronizer branch — is a typed
+  invocation of git plumbing behind the same boundary, because gix 0.85
+  implements no push; fetched tips land in the neutral
+  `refs/synchronizer/*` namespace so no branch, remote-tracking ref, index,
+  or working copy moves.
 
 ## 8. Verification — role-resolved builder
 
@@ -263,16 +278,35 @@ run — and their own verifies surface the breakage as collected failures
 
   No hostname exists in the tool or its configuration; in the psyche's
   cluster the configured role currently resolves to prometheus, and that
-  fact lives in the cluster configuration, not here. The concrete surface
-  the production directory reads — the cluster flake's role outputs vs a
-  Lojix query — is an implementation detail to confirm with OS-ops
-  (§14 q5). Resolution happens once per run.
-- The verify is the **narrow check**: `nix build` of the consumer's default
-  package at the pushed revision, addressed as a remote flake reference
-  (`github:<owner>/<component>/<revision>#default`) and executed on the
-  resolved host (ssh invocation, per the push-first builder doctrine: the
-  builder only sees pushed refs). Wide `nix flake check` sweeps are
-  deliberately not the verify gate (they are loop-killers; kink ledger #24).
+  fact lives in the cluster configuration, not here. Resolution happens
+  once per run.
+- **The confirmed cluster surface** is the cluster proposal document — the
+  horizon-rs `ClusterProposal` NOTA datom (production:
+  `goldragon/datom.nota`) whose per-node `services` vectors author every
+  cluster role, e.g. `(NixBuilder (Some 6))`. Cluster flakes expose no
+  role→host output, the production cluster repository is not a flake, and
+  Lojix records deployment generations, not roles. The production directory
+  decodes a narrow, count-strict positional view of that datom (root 5
+  fields, node 17 fields) through the canonical codec primitives and
+  selects among the online nodes holding the role by declared capacity
+  (`maximum_jobs`, absent meaning one job), name order breaking ties; a
+  schema-count mismatch fails loud as a collected RoleResolution failure
+  rather than misreading positions. horizon-rs stays the schema owner (it
+  is currently unconsumable as a cargo dependency: its `nota-next` git
+  dependency targets a branch where the package was renamed).
+- **The verify is wire-exercising (psyche-locked).** Where the repository's
+  flake exposes checks that build *and launch* the daemons — the class that
+  caught the build-vintage skew at runtime — those checks are the gate: the
+  builder enumerates `checks.<system>` at the pushed revision and builds
+  the wire-exercising class, selected by check-name words
+  (`daemon`/`socket`/`wire`; `src/build_verify.rs::WireCheckClassifier`).
+  Only where no such check exists does the verify fall back to the default
+  `nix build` of the flake. A green plain build alone is not sufficient
+  evidence. Everything is addressed as a remote flake reference
+  (`github:<owner>/<component>/<revision>`) and executed on the resolved
+  host over ssh, per the push-first builder doctrine: the builder only sees
+  pushed refs. Wide `nix flake check` sweeps remain deliberately out (they
+  are loop-killers; kink ledger #24).
 - A verification failure is report data, never a crate error.
 
 ## 9. Failure policy — collect, keep going
@@ -289,16 +323,19 @@ pushes still proceed and every verification reports `NotAttempted`.
 ## 10. Report (NOTA)
 
 `src/report.rs`. One NOTA document per run, printed to stdout; the Rust
-schema plus round-trip tests own the wire truth.
+schema plus round-trip tests own the wire truth. As in §3, the record names
+label the schema; struct records are untagged on the wire.
 
 ```nota
-;; SynchronizerReport: one run's outcome, levels in ascent order (strict positional).
-(SynchronizerReport <started-at> <finished-at> [<level-outcome>] [<failure>])
+;; SynchronizerReport: one run's outcome, levels in ascent order (strict positional, untagged).
+(<started-at> <finished-at> [<level-outcome>] [<failure>])
 ;;   started-at / finished-at: unix seconds
 
-(LevelOutcome <index> [<repository-outcome>])
+;; LevelOutcome (untagged)
+(<index> [<repository-outcome>])
 
-(RepositoryOutcome <component-name> <action> <verification>)
+;; RepositoryOutcome (untagged)
+(<component-name> <action> <verification>)
 ;;   action:
 ;;     AlreadyAligned — every pin already matched its resolved target
 ;;     (Bumped [<applied-bump>] (PushedBranch <branch-name> <tip-revision>))
@@ -308,13 +345,16 @@ schema plus round-trip tests own the wire truth.
 ;;     (VerifyFailed <builder-host>) — detail in the failures vector
 ;;     NotAttempted
 
-(AppliedBump <dependency-name> <pin-layer> <previous> <next>)
+;; AppliedBump (untagged)
+(<dependency-name> <pin-layer> <previous> <next>)
 ;;   pin-layer      : CargoManifest | CargoLock | FlakeManifest | FlakeLock
 ;;   previous / next: (Revision <commit>) | (Reference <branch-name>)
 
-(Failure <component-name> <stage> <detail>)
+;; Failure (untagged)
+(<component-name> <stage> <detail>)
 ;;   stage : Fetch | Resolve | ManifestEdit | LockEdit | Prefetch | Commit | Push | RoleResolution | Verify
-;;   detail: pipe text — decode error or command output excerpt
+;;   detail: string — decode error or command output excerpt
+;;   run-scoped failures (role resolution) carry the component name synchronizer
 ```
 
 This covers the four required contents: bumps applied (`AppliedBump`),
@@ -336,8 +376,9 @@ branches pushed (`PushedBranch`), per-level verify results
         otherwise RemoteMainTip
      b  stale <- edges whose pinned revision != target revision
      c  if stale is empty: record AlreadyAligned / NotAttempted; continue
-     d  apply typed bumps:
-          CargoLock      — repin revision + package version at target
+     d  apply typed bumps (format-preserving writes):
+          CargoLock      — repin revision + package version at target;
+                           transitive gap => cargo update --precise fallback
           CargoManifest  — redirect branch main -> synchronizer   (cascade pins only)
           FlakeLock      — set rev; prefetch narHash (the only nix call
                            in the pin path); set original.ref     (cascade pins only)
@@ -345,8 +386,9 @@ branches pushed (`PushedBranch`), per-level verify results
      e  commit the edited files on top of the remote main tip;
         push the tool-owned synchronizer branch (force)
      f  ledger.record(component, pushed tip)
-     g  verify: nix build of the default package at the pushed revision
-        on the role-resolved builder host
+     g  verify at the pushed revision on the role-resolved builder host:
+        the repo's wire-exercising checks, or the default nix build where
+        it has none
      h  every step's failure is collected; the ascent continues
 6  render the SynchronizerReport as NOTA; exit nonzero when failures exist
 ```
@@ -363,27 +405,38 @@ src/
 ├── main.rs                fn main only: argv -> run -> NOTA report -> exit code
 ├── error.rs               typed crate Error (thiserror); run-fatal + infrastructure only
 ├── types.rs               domain newtypes (ComponentName, CommitIdentifier, BranchName,
-│                          BuilderRole, BuilderHost, NarHash, ...)
+│                          BuilderRole, BuilderHost, NarHash, ...) + repository-identity grammar
 ├── configuration.rs       NOTA config schema + load (canonical codec only)
-├── cargo_manifest.rs      typed Cargo.toml model (serde/TOML) + cascade redirect
-├── cargo_lock.rs          typed Cargo.lock model (serde/TOML) + git-pin repin
-├── toml_pretty.rs         PrettyPrinter: canonical manifest + lock rendering
+├── toml_document.rs       PreservedTomlDocument: the format-preserving TOML write surface
+├── cargo_manifest.rs      typed Cargo.toml model (serde read + preserved write) + cascade redirect
+├── cargo_lock.rs          typed Cargo.lock model (serde read + preserved write) + git-pin repin
+├── transitive_lock.rs     TransitiveLockResolver boundary + cargo update --precise fallback
 ├── flake_lock.rs          typed flake.lock model (serde/JSON) + NarHashSource boundary
 ├── flake_manifest.rs      flake.nix input-URL scanner (winnow) + span rewrite
 ├── component_manifests.rs both pin surfaces of one component, read at its main tip
-├── topology.rs            DependencyEdge/PinLayer, DAG discovery, ascent levels
+├── topology.rs            DependencyEdge/PinLayer/LocalPinName, DAG discovery, ascent levels
 ├── version_resolver.rs    ResolvedTarget, BumpLedger, cascade rule, staleness
-├── git_repository.rs      object-store git boundary: ls-remote, fetch, object-level
-│                          commit, synchronizer-branch push
-├── role_resolution.rs     ClusterRoleDirectory trait + CriomOS directory stub
-├── build_verify.rs        BuildVerifier: default-package build at pushed rev on host
+├── git_repository.rs      ComponentRepository boundary + gix object store: ls-remote, fetch,
+│                          object-level commit, synchronizer-branch push
+├── role_resolution.rs     ClusterRoleDirectory trait + cluster-proposal directory
+├── build_verify.rs        Verifier boundary + BuildVerifier: wire-exercising checks at
+│                          pushed rev on the resolved host; WireCheckClassifier
 ├── report.rs              NOTA report schema + rendering
-└── driver.rs              SynchronizerRun: the ascent
+└── driver.rs              SynchronizerRun: boundary composition + the ascent
 tests/
+├── fixtures/mod.rs        shared in-memory boundaries (repository, prefetch, verifier)
+├── build_verify.rs        wire-check classification + installable addressing witnesses
+├── cargo_lock.rs          pin-grammar + format-preserving repin witnesses
+├── cargo_manifest.rs      comment/layout-preservation witnesses
 ├── configuration.rs       config round-trip + checkout resolution witnesses
+├── driver.rs              the three-component fixture ascent (cascade end to end)
+├── flake_lock.rs          byte round-trip + rev-set fidelity witnesses
+├── flake_manifest.rs      scanner + span-rewrite witnesses
+├── git_repository.rs      gix object-level commit witness (no ref moves)
 ├── report.rs              report round-trip witness
+├── role_resolution.rs     cluster-proposal role→host witnesses
 ├── topology.rs            discovery-by-repository-identity + level/cycle witnesses
-└── version_resolver.rs    cascade-rule witnesses
+└── version_resolver.rs    cascade-rule + per-layer staleness witnesses
 ```
 
 One capability per module; every behavior is a method on a data-bearing
@@ -400,57 +453,45 @@ Test seeds — each of these should become a witness or review gate:
   store.
 - No hostname appears in source or configuration; builder selection passes
   through `ClusterRoleDirectory`.
-- All manifest and lock manipulation is typed: serde for TOML and JSON,
-  winnow for the git-source and input-URL grammars, the canonical NOTA
-  codec (record qvb3) for config and report. The only text substitution is
-  the flake.nix input-URL span rewrite of a parsed literal.
-- The pin-editing path shells out only for `nix flake prefetch` (narHash);
-  build execution exists only inside `BuildVerifier`; remote reads are
-  ls-remote only.
+- All manifest and lock manipulation is typed: serde for TOML and JSON
+  reading, the format-preserving TOML document for TOML writing, winnow for
+  the git-source and input-URL grammars, the canonical NOTA codec (record
+  qvb3) for config and report. The only text substitution is the flake.nix
+  input-URL span rewrite of a parsed literal.
+- A pin write is non-destructive: comments, alignment, and layout of
+  everything untouched survive byte-for-byte.
+- The pin-editing path shells out only for `nix flake prefetch` (narHash)
+  and, on a detected transitive gap, the controlled
+  `cargo update --precise` fallback in a scratch tree; build execution
+  exists only inside `BuildVerifier`; git transport (ls-remote, fetch,
+  synchronizer-branch push) exists only inside `GitRepository`.
 - Per-repository failures are collected, never fatal; only configuration
   load and topology discovery abort a run.
 - Topology edges derive only from manifests matched by repository identity
   (never package name, never configuration declarations).
-- `SynchronizerConfig` and `SynchronizerReport` are strict positional NOTA:
-  no optional in a positional slot; growth by trailing field or new
-  variant.
+- The configuration and report roots are strict positional NOTA, untagged
+  struct records: no optional in a positional slot; growth by trailing
+  field or new variant.
 
-## 14. Undecided — for psyche sign-off
+## 14. Resolved sign-off decisions
 
-Numbered questions referenced from the sections above. Everything outside
-this list is proposed as accepted design.
+The sign-off draft's open questions, as decided by the psyche and folded
+into the sections above:
 
-1. **Cargo.toml comment loss.** Serde reserialization drops TOML comments;
-   some component manifests (e.g. spirit's) carry load-bearing comments. A
-   cascade bump must rewrite `Cargo.toml` (branch redirect), so those
-   comments vanish *on the synchronizer branch*. `main` is never rewritten,
-   but a wholesale merge of a synchronizer branch would land the stripped
-   manifest. Accept (synchronizer branches are staging; integrators re-edit
-   manifests when landing), or require comment-preserving TOML writes,
-   which conflicts with the locked real-serde decision?
-2. **Transitive lock completeness.** A typed `Cargo.lock` edit covers
-   rev/version/branch of existing entries; it cannot add entries when a
-   dependency's own dependency set changed at the target revision.
-   Designed behavior: build-verify catches it, failure is collected. Should
-   the tool additionally fall back to shelling `cargo update -p <package>`
-   in exactly that case, or is verify-catches-it the accepted stop line?
-3. **Synchronizer branch lifecycle.** Designed: the branch is tool-owned
-   staging, rebuilt each run as one commit on the current remote `main` tip
-   and force-pushed; merge-back to `main` is out of scope. Confirm.
-4. **Git plumbing choice.** The `GitRepository` boundary and its invariants
-   are the design; behind it, in-process `gix` vs shelling to git plumbing
-   (the raw-git workspace boundary governs agent work — does it also bind
-   this tool's internals, which would suggest jj or gix?). Preference?
-5. **Cluster-config surface** (OS-ops confirm). Which concrete surface
-   should `CriomosClusterDirectory` read for role→host — the cluster
-   flake's node/role outputs (CriomOS-test-cluster shape), a Lojix query,
-   or another artifact? Is `(ClusterFlake <flake-reference>)` the right
-   configuration carrier for it?
-6. **Verify target.** Designed: default package build only (narrow check).
-   Should any component be verified with a named check set instead, and if
-   so, should that live in configuration or stay out of scope?
-7. **Third-party input scope.** Component pins only, by design. Should the
-   same machinery later bump shared third-party inputs (fenix — the kink #1
-   toolchain-pin rot, nixpkgs, crane) toward a configured target, as a
-   second phase (relates to primary-95fm)? Out of scope for this
-   implementation unless directed.
+1. **Cargo.toml comments are preserved** (locked): format-preserving
+   toml_edit writes; serde stays the read model (§4).
+2. **Transitive lock gaps** get the controlled
+   `cargo update -p <package> --precise <revision>` fallback (§4).
+3. **Synchronizer branch lifecycle** confirmed: tool-owned staging,
+   force-rebuilt each run from the remote `main` tip; merge-back out of
+   scope (§7).
+4. **Git plumbing**: gix for object operations; typed git plumbing for
+   transport, gix having no push (§7).
+5. **Cluster surface**: the cluster proposal datom
+   (`(ClusterProposal <absolute-path>)`), confirmed by OS-ops discovery
+   (§8).
+6. **Verify target** (locked): the wire-exercising check class, default
+   build only where a repo has none (§8).
+7. **Third-party inputs stay out of scope**: only LiGoldragon component
+   pins cascade; fenix/nixpkgs/crane convergence (primary-95fm) is separate
+   work (§1).

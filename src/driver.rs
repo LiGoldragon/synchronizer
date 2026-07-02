@@ -502,7 +502,8 @@ impl SynchronizerRun {
                         && let LocalPinName::CargoPackage(name) = pin.edge().local_name()
                         && self.cargo_lock_has_gap(name, &producer, &work, loaded)
                     {
-                        lock_gap = Some((name.clone(), target.revision().clone()));
+                        let package = self.producer_package_name(name, &producer, loaded);
+                        lock_gap = Some((package, target.revision().clone()));
                     }
                 }
                 Err((stage, error)) => {
@@ -793,6 +794,38 @@ impl SynchronizerRun {
         } else {
             None
         }
+    }
+
+    /// The Cargo package identity `cargo update -p <package>` must address for
+    /// the fallback: the name the *producer* publishes, read from its root
+    /// `[package] name` at the target revision.
+    ///
+    /// The consumer's recorded pin name is the repo/table key, which need not
+    /// be the package identity — a `nota-next`-keyed pin (or a lock entry left
+    /// from before the producer dropped `-next` from its crate names) resolves
+    /// to the package `nota`. Edge discovery matches producers by git-URL
+    /// repository identity, never by this name (ARCHITECTURE.md §4); the
+    /// fallback's `-p` spec is the one place a package identity is required, so
+    /// it comes from the producer's own manifest, not the consumer's key.
+    /// Passing the repo/table key yields `no matching package named <key>` and
+    /// leaves the typed-edited lock — invalid at the new revision — committed.
+    ///
+    /// A producer whose root manifest publishes no package (a virtual
+    /// workspace) cannot answer for the identity; there the consumer's recorded
+    /// name is the best available spec and the workspace member's own crate
+    /// name.
+    fn producer_package_name(
+        &self,
+        recorded: &DependencyName,
+        producer: &ComponentName,
+        loaded: &BTreeMap<ComponentName, LoadedComponent>,
+    ) -> DependencyName {
+        loaded
+            .get(producer)
+            .and_then(|component| component.manifests.cargo())
+            .and_then(|cargo| cargo.manifest().package_name())
+            .cloned()
+            .unwrap_or_else(|| recorded.clone())
     }
 
     /// Whether the typed repin left a transitive gap: the producer's

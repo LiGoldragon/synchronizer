@@ -29,7 +29,9 @@ pub struct TransitiveLockRequest {
     pub edited_manifest: TomlText,
     /// The consumer's `Cargo.lock` with the typed edits applied so far.
     pub edited_lock: TomlText,
-    /// The bumped package the gap belongs to.
+    /// The producer's Cargo package identity — the name `cargo update -p`
+    /// addresses, read from the producer's own manifest, not the repo/table
+    /// key the consumer records the pin under.
     pub package: DependencyName,
     /// The exact revision the package must lock to.
     pub revision: CommitIdentifier,

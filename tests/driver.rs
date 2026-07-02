@@ -23,7 +23,7 @@ use synchronizer::configuration::{
     ClusterConfiguration, Component, ComponentCheckout, Forge, ForgeOwner, SynchronizerConfig,
 };
 use synchronizer::driver::{RunBoundaries, SynchronizerRun};
-use synchronizer::report::{Action, PinValue, Verification};
+use synchronizer::report::{Action, FailureStage, PinValue, Verification, VerificationGate};
 use synchronizer::topology::PinLayer;
 use synchronizer::types::{AbsolutePath, BranchName, BuilderHost, BuilderRole, ComponentName};
 
@@ -334,7 +334,7 @@ fn the_ascent_cascades_bumps_from_the_leaves() {
     );
     assert_eq!(
         router_outcome.verification(),
-        &Verification::Verified(BuilderHost::new("prometheus"))
+        &Verification::Verified(BuilderHost::new("prometheus"), VerificationGate::WireChecks)
     );
 
     // The router's committed lock synchronizes the recorded version to the
@@ -408,12 +408,21 @@ fn the_ascent_cascades_bumps_from_the_leaves() {
     );
     assert!(harness_manifest.contains("branch = \"synchronizer\""));
 
-    // The committed harness flake.lock follows the synchronizer branch so a
-    // later `nix flake update` stays on the cascade.
+    // The committed harness flake.lock carries the cascade in the locked
+    // rev alone; the original keeps asking for what flake.nix declares.
+    // Nix re-resolves originals from flake.nix on update, so a redirected
+    // original would be discarded and the input re-locked to main.
     let harness_flake_lock = harness
         .file_text(&harness_tip, "flake.lock")
         .expect("the bump commit carries the flake lock");
-    assert!(harness_flake_lock.contains("\"ref\": \"synchronizer\""));
+    assert!(
+        harness_flake_lock.contains("\"ref\": \"main\""),
+        "the original is preserved as flake.nix declares it"
+    );
+    assert!(
+        !harness_flake_lock.contains("\"ref\": \"synchronizer\""),
+        "no original is redirected to the synchronizer branch"
+    );
     assert!(harness_flake_lock.contains(&format!("\"rev\": \"{}\"", router_tip.as_str())));
 
     // The frame was never committed to or pushed; only synchronizer
@@ -429,5 +438,86 @@ fn the_ascent_cascades_bumps_from_the_leaves() {
             (ComponentName::new("signal-router"), router_tip),
             (ComponentName::new("signal-harness"), harness_tip),
         ]
+    );
+}
+
+/// §9 collect-and-continue: a producer whose fetch fails is not a
+/// dependency cycle. Its consumers are placed in the ascent, their
+/// resolution failures are collected, and the run completes with a report
+/// instead of dying on `Error::DependencyCycle`.
+#[test]
+fn a_fetch_failed_producer_collects_failures_and_the_ascent_continues() {
+    // The opener knows only the router: signal-frame's load fails at the
+    // fetch stage, yet the router still pins it in its manifests.
+    let router = Rc::new(FixtureRepository::new(
+        "signal-router",
+        revision("router-main"),
+        router_files(),
+    ));
+    let opener = FixtureOpener {
+        repositories: BTreeMap::from([(ComponentName::new("signal-router"), Rc::clone(&router))]),
+    };
+    let verified = Rc::new(RefCell::new(Vec::new()));
+    let config = SynchronizerConfig::new(
+        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
+        AbsolutePath::new("/git/github.com/LiGoldragon"),
+        vec![
+            Component::new(
+                ComponentName::new("signal-frame"),
+                ComponentCheckout::AtRoot,
+            ),
+            Component::new(
+                ComponentName::new("signal-router"),
+                ComponentCheckout::AtRoot,
+            ),
+        ],
+        BuilderRole::new("NixBuilder"),
+        ClusterConfiguration::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
+    );
+    let run = SynchronizerRun::with_boundaries(
+        config,
+        RunBoundaries {
+            repository_opener: Box::new(opener),
+            nar_hash_source: Box::new(FixturePrefetch),
+            role_directory: Box::new(FixtureRoleDirectory {
+                host: BuilderHost::new("prometheus"),
+            }),
+            verifier_source: Box::new(FixtureVerifierSource {
+                verified: Rc::clone(&verified),
+            }),
+            lock_resolver: Box::new(UnreachableLockResolver {
+                witness: "fetch-failure witness",
+            }),
+        },
+    );
+    let report = run
+        .execute()
+        .expect("an unloaded producer is a collected failure, never run-fatal");
+    let stages: Vec<FailureStage> = report
+        .failures()
+        .iter()
+        .map(|failure| failure.stage())
+        .collect();
+    assert!(
+        stages.contains(&FailureStage::Fetch),
+        "the frame's failed load is collected: {stages:?}"
+    );
+    assert!(
+        stages.contains(&FailureStage::Resolve),
+        "the router's unresolvable frame pin is collected: {stages:?}"
+    );
+    let router_outcome = report
+        .levels()
+        .iter()
+        .flat_map(|level| level.repositories())
+        .find(|outcome| outcome.component() == &ComponentName::new("signal-router"))
+        .expect("the router joins the ascent despite the unloaded producer");
+    assert_eq!(
+        router_outcome.action(),
+        &Action::BumpFailed(FailureStage::Resolve)
+    );
+    assert!(
+        router.pushed.borrow().is_empty(),
+        "nothing is pushed for a consumer whose resolution failed"
     );
 }

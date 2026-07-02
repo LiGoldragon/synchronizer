@@ -13,7 +13,7 @@ use winnow::combinator::opt;
 use winnow::token::take_while;
 
 use crate::cargo_manifest::{DependencyName, GitReference, PackageVersion};
-use crate::error::Error;
+use crate::error::{Error, UnbumpablePinReason};
 use crate::toml_document::PreservedTomlDocument;
 use crate::topology::PinLayer;
 use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl, TomlText};
@@ -105,6 +105,12 @@ impl CargoLock {
     /// transitive entries; gap detection routes that case to the controlled
     /// `cargo update --precise` fallback, and build-verify catches whatever
     /// remains (ARCHITECTURE.md §4).
+    ///
+    /// A package recorded by several same-name git entries, or one whose
+    /// source query deliberately pins a revision or tag, fails loud
+    /// ([`Error::UnbumpablePin`]): a name-addressed edit would silently
+    /// alias the first entry, and rewriting a deliberate `?rev=`/`?tag=`
+    /// pin would override the consumer's explicit choice.
     pub fn repin_git_package(
         &mut self,
         name: &DependencyName,
@@ -112,6 +118,25 @@ impl CargoLock {
         revision: CommitIdentifier,
         version_at_target: Option<PackageVersion>,
     ) -> Result<CommitIdentifier, Error> {
+        let same_name_git_entries = self
+            .read
+            .packages
+            .iter()
+            .filter(|entry| {
+                &entry.name == name
+                    && entry
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| matches!(source.git_pin(), Ok(Some(_))))
+            })
+            .count();
+        if same_name_git_entries > 1 {
+            return Err(Error::UnbumpablePin {
+                consumer: self.component.clone(),
+                dependency: name.as_str().to_string(),
+                reason: UnbumpablePinReason::MultipleEntries,
+            });
+        }
         let entry = self
             .read
             .packages
@@ -129,6 +154,23 @@ impl CargoLock {
             })?;
         let source = entry.source.as_ref().expect("git source checked");
         let pin = source.git_pin()?.expect("git pin checked");
+        match pin.reference() {
+            GitReference::Revision(_) => {
+                return Err(Error::UnbumpablePin {
+                    consumer: self.component.clone(),
+                    dependency: name.as_str().to_string(),
+                    reason: UnbumpablePinReason::DeliberateRevisionPin,
+                });
+            }
+            GitReference::Tag(_) => {
+                return Err(Error::UnbumpablePin {
+                    consumer: self.component.clone(),
+                    dependency: name.as_str().to_string(),
+                    reason: UnbumpablePinReason::DeliberateTagPin,
+                });
+            }
+            GitReference::Branch(_) | GitReference::DefaultBranch => {}
+        }
         let previous = pin.revision.clone();
         let next_pin = GitPin {
             url: pin.url.clone(),

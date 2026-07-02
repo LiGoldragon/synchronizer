@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 use crate::topology::PinLayer;
-use crate::types::{BranchName, CommitIdentifier, ComponentName, NarHash};
+use crate::types::{CommitIdentifier, ComponentName, NarHash};
 
 /// A `flake.lock` document (lock format version 7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,16 +69,18 @@ impl FlakeLock {
     /// revision.
     ///
     /// Sets `locked.rev`, `locked.narHash`, and `locked.lastModified` from
-    /// `prefetched`, and applies `original_reference` — `FollowBranch` on a
-    /// cascade pin so a later `nix flake update` follows the same branch the
-    /// lock points into, `Preserve` on a plain main-tip repin.
+    /// `prefetched`. The node's `original` is **always preserved** — on a
+    /// cascade pin too. The locked `rev` alone carries the cascade: Nix
+    /// re-resolves originals from `flake.nix` on update, so a lock whose
+    /// `original` mismatches what `flake.nix` declares is discarded and the
+    /// input re-locked from the declaration (back to `main`, reintroducing
+    /// the skew this tool exists to kill; proven against Nix 2.34.6).
     pub fn repin_input(
         &mut self,
         consumer: &ComponentName,
         input: &InputName,
         revision: CommitIdentifier,
         prefetched: PrefetchedSource,
-        original_reference: OriginalReferenceEdit,
     ) -> Result<CommitIdentifier, Error> {
         let node_name = self
             .nodes
@@ -111,11 +113,6 @@ impl FlakeLock {
         locked.rev = Some(revision.as_str().to_string());
         locked.nar_hash = Some(prefetched.nar_hash.as_str().to_string());
         locked.last_modified = Some(prefetched.last_modified);
-        if let OriginalReferenceEdit::FollowBranch(branch) = original_reference
-            && let Some(original) = node.original.as_mut()
-        {
-            original.reference = Some(branch.as_str().to_string());
-        }
         Ok(previous)
     }
 
@@ -272,17 +269,6 @@ impl OriginalSource {
     pub fn reference(&self) -> Option<&str> {
         self.reference.as_deref()
     }
-}
-
-/// What a repin does to the node's `original.ref`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OriginalReferenceEdit {
-    /// A plain main-tip repin: `flake.nix` keeps asking for what it asked
-    /// for.
-    Preserve,
-    /// A cascade pin: a later `nix flake update` must follow the branch the
-    /// lock now points into.
-    FollowBranch(BranchName),
 }
 
 /// A fully pinned flake reference to prefetch, e.g.

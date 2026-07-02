@@ -18,9 +18,7 @@ use crate::cargo_manifest::{DependencyName, GitReference, PackageVersion};
 use crate::component_manifests::ComponentManifests;
 use crate::configuration::SynchronizerConfig;
 use crate::error::Error;
-use crate::flake_lock::{
-    NarHashSource, NixFlakePrefetch, OriginalReferenceEdit, PinnedFlakeReference, PrefetchedSource,
-};
+use crate::flake_lock::{NarHashSource, NixFlakePrefetch, PinnedFlakeReference, PrefetchedSource};
 use crate::git_repository::{
     CommitMessage, ComponentRepository, FileEdit, GitRepository, RepositoryFilePath,
 };
@@ -369,8 +367,8 @@ impl SynchronizerRun {
                 let verification = match verifier {
                     None => Verification::NotAttempted,
                     Some(verifier) => match verifier.verify(self.config.forge(), component, &tip) {
-                        VerificationOutcome::Verified => {
-                            Verification::Verified(verifier.host().clone())
+                        VerificationOutcome::Verified(gate) => {
+                            Verification::Verified(verifier.host().clone(), gate)
                         }
                         VerificationOutcome::Failed(failure) => {
                             failures.push(Failure::new(
@@ -678,12 +676,10 @@ impl SynchronizerRun {
                 prefetched
             }
         };
-        let original_reference = match target {
-            ResolvedTarget::RemoteMainTip(_) => OriginalReferenceEdit::Preserve,
-            ResolvedTarget::SynchronizerTip(_) => {
-                OriginalReferenceEdit::FollowBranch(BranchName::synchronizer())
-            }
-        };
+        // The node's `original` is always preserved: the locked rev alone
+        // carries the cascade. Nix re-resolves originals from flake.nix on
+        // update, so an original edited to follow the synchronizer branch
+        // would be discarded and the input re-locked to main.
         let flake = work.flake_mut().ok_or_else(|| Error::ManifestDecode {
             component: component.clone(),
             layer: PinLayer::FlakeLock,
@@ -694,7 +690,6 @@ impl SynchronizerRun {
             input,
             target.revision().clone(),
             prefetched,
-            original_reference,
         )?;
         Ok(AppliedBump::new(
             producer.clone(),

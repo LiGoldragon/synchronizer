@@ -188,9 +188,11 @@ impl DependencyGraph {
     /// The ascent order: level 0 holds the leaves (components with no
     /// component dependencies), level N holds components all of whose
     /// dependencies sit in levels below N. `Err(DependencyCycle)` when the
-    /// graph is not a DAG. Kahn's algorithm; deterministic name order
-    /// within a level.
+    /// graph is not a DAG — only genuine cycles among the graph's own
+    /// members; an edge to a producer that failed to load is not a cycle.
+    /// Kahn's algorithm; deterministic name order within a level.
     pub fn ascent_levels(&self) -> Result<TopologicalLevels, Error> {
+        let members: BTreeSet<&ComponentName> = self.components.iter().collect();
         let mut remaining_dependencies: BTreeMap<&ComponentName, BTreeSet<&ComponentName>> = self
             .components
             .iter()
@@ -199,6 +201,14 @@ impl DependencyGraph {
         for edge in &self.edges {
             if edge.consumer() == edge.producer() {
                 continue; // self-pins cannot order the ascent
+            }
+            if !members.contains(edge.producer()) {
+                // A producer outside the graph's member set — configured
+                // but not loaded this run (its fetch failed) — cannot
+                // order the ascent and is not a cycle. Its consumers are
+                // placed; resolving the edge then fails and is collected
+                // (§9 collect-and-continue).
+                continue;
             }
             if let Some(producers) = remaining_dependencies.get_mut(edge.consumer()) {
                 producers.insert(edge.producer());

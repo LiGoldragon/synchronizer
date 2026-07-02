@@ -231,12 +231,23 @@ impl PushedBranch {
 /// The verify result for one repository.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub enum Verification {
-    Verified(BuilderHost),
+    /// The gate names the class that passed: a `DefaultPackage` pass is a
+    /// visible downgrade, never disguised as a wire-exercising verify.
+    Verified(BuilderHost, VerificationGate),
     /// Detail lives in the failures vector.
     VerifyFailed(BuilderHost),
     /// No verify ran: the bump failed earlier, no builder host resolved,
     /// or nothing changed.
     NotAttempted,
+}
+
+/// Which verify class gated a passed verification (ARCHITECTURE.md §8):
+/// the repository's wire-exercising checks, or — only where none exist —
+/// the default `nix build` of the flake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub enum VerificationGate {
+    WireChecks,
+    DefaultPackage,
 }
 
 /// One collected failure. Failures never abort the ascent; they are

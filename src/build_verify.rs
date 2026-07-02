@@ -14,6 +14,12 @@
 //! catching runtime wire skew is. Wide `nix flake check` sweeps remain
 //! deliberately out (loop-killers).
 //!
+//! The absence of a `checks` attribute is *data* (an empty check list and
+//! the legitimate default-build fallback); an eval or transport failure
+//! while enumerating checks is a *failure*. The two are never conflated:
+//! a broken ssh session or undecodable eval must not silently downgrade
+//! the gate to a plain build — the one forbidden class.
+//!
 //! A verification failure is report data, not a crate [`Error`]: the ascent
 //! continues and the failure is collected.
 
@@ -21,6 +27,7 @@ use std::sync::OnceLock;
 
 use crate::configuration::Forge;
 use crate::error::Error;
+use crate::report::VerificationGate;
 use crate::role_resolution::ClusterRoleDirectory;
 use crate::types::{BuilderHost, BuilderRole, CommitIdentifier, ComponentName, FlakeReference};
 
@@ -112,6 +119,14 @@ pub enum VerificationTarget {
 }
 
 impl VerificationTarget {
+    /// The gate class this target represents in the run report.
+    pub fn gate(&self) -> VerificationGate {
+        match self {
+            Self::WireChecks(_) => VerificationGate::WireChecks,
+            Self::DefaultPackage => VerificationGate::DefaultPackage,
+        }
+    }
+
     /// The nix installables this target builds at `reference` on `system`.
     pub fn installables(&self, reference: &FlakeReference, system: &str) -> Vec<String> {
         match self {
@@ -201,21 +216,67 @@ impl BuildVerifier {
         Ok(system)
     }
 
-    /// The check names the flake at `reference` exposes for `system`. A
-    /// repository without an evaluable checks attribute has no
-    /// wire-exercising checks; the caller falls back to the default build.
-    fn check_names(&self, reference: &FlakeReference, system: &str) -> Vec<CheckName> {
-        let command = format!(
-            "nix eval '{}#checks.{}' --apply builtins.attrNames --json",
-            reference.as_str(),
-            system
-        );
-        let Ok(stdout) = self.run_on_host(&command) else {
-            return Vec::new();
-        };
+    /// The check names the flake at `reference` exposes for `system`.
+    ///
+    /// A repository without a checks attribute answers with an empty list
+    /// — the enumeration expression treats absence as data, so the caller's
+    /// default-build fallback is legitimate. An eval or transport failure
+    /// is `Err` and becomes a collected verify failure: it must never
+    /// silently downgrade the gate to a plain build.
+    fn check_names(
+        &self,
+        reference: &FlakeReference,
+        system: &str,
+    ) -> Result<Vec<CheckName>, String> {
+        let enumeration = CheckEnumeration::new(reference.clone(), system);
+        let stdout = self.run_on_host(&enumeration.command())?;
+        enumeration.decode(&stdout)
+    }
+}
+
+/// The check-enumeration probe for one pushed revision: the eval command
+/// sent to the builder and the decoding of its reply.
+///
+/// The expression opens the locked flake reference with `builtins.getFlake`
+/// and answers `[]` when no `checks.<system>` attribute exists, so absence
+/// is a first-class answer and every command failure is a genuine failure —
+/// the distinction that keeps an eval/ssh breakage from masquerading as
+/// "no checks" and downgrading the verify to a plain build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckEnumeration {
+    reference: FlakeReference,
+    system: String,
+}
+
+impl CheckEnumeration {
+    pub fn new(reference: FlakeReference, system: impl Into<String>) -> Self {
+        Self {
+            reference,
+            system: system.into(),
+        }
+    }
+
+    /// The command run on the builder host.
+    pub fn command(&self) -> String {
+        format!(
+            "nix eval --json --expr 'let flake = builtins.getFlake \"{}\"; in if flake ? checks && flake.checks ? \"{}\" then builtins.attrNames flake.checks.\"{}\" else [ ]'",
+            self.reference.as_str(),
+            self.system,
+            self.system
+        )
+    }
+
+    /// Decode the eval reply. An undecodable reply is a failure, never an
+    /// empty check list.
+    pub fn decode(&self, stdout: &str) -> Result<Vec<CheckName>, String> {
         serde_json::from_str::<Vec<String>>(stdout.trim())
             .map(|names| names.into_iter().map(CheckName::new).collect())
-            .unwrap_or_default()
+            .map_err(|error| {
+                format!(
+                    "check enumeration of {} undecodable: {error}: {stdout}",
+                    self.reference.as_str()
+                )
+            })
     }
 }
 
@@ -237,7 +298,14 @@ impl Verifier for BuildVerifier {
                 return VerificationOutcome::Failed(VerificationFailure { detail });
             }
         };
-        let names = self.check_names(&reference, &system);
+        let names = match self.check_names(&reference, &system) {
+            Ok(names) => names,
+            Err(detail) => {
+                // An eval or transport failure, not an absent checks
+                // attribute: fail loud rather than downgrade the gate.
+                return VerificationOutcome::Failed(VerificationFailure { detail });
+            }
+        };
         let target = self.classifier.select(&names);
         let installables = target.installables(&reference, &system);
         let quoted: Vec<String> = installables
@@ -246,16 +314,17 @@ impl Verifier for BuildVerifier {
             .collect();
         let command = format!("nix build --no-link {}", quoted.join(" "));
         match self.run_on_host(&command) {
-            Ok(_) => VerificationOutcome::Verified,
+            Ok(_) => VerificationOutcome::Verified(target.gate()),
             Err(detail) => VerificationOutcome::Failed(VerificationFailure { detail }),
         }
     }
 }
 
-/// What one verification produced.
+/// What one verification produced. A pass names the gate class that
+/// passed, so a default-build pass stays visible in the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationOutcome {
-    Verified,
+    Verified(VerificationGate),
     Failed(VerificationFailure),
 }
 

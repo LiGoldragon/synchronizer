@@ -156,10 +156,20 @@ each is a typed model:
   revision (read through the dependency's object store, §7). The write is
   the format-preserving document edit; Cargo's own rendering, `@generated`
   header included, survives byte-for-byte outside the edited entries.
-- **Package name vs repository name.** A Cargo dependency key is a package
-  name and may differ from the repository name (`nota` lives in
-  `nota-next`). All component matching goes through the git URL's
-  repository identity, never the package name.
+- **Package name vs repository name vs table key.** A Cargo dependency
+  resolves to a package name that may differ from the repository name
+  (`nota` lives in `nota-next`) *and* from the dependency table key
+  (`nota-next = { package = "nota", ... }`). Component matching goes
+  through the git URL's repository identity, never the package name; the
+  format-preserving document is addressed by the table key
+  (`DependencyKey`), never the resolved package name.
+- **Multi-pin and rev-pin safety.** A dependency deliberately pinned by
+  `rev =`/`?rev=` or tag, or a package pinned by several same-name
+  entries, is **unbumpable**: the bump fails loud (`Error::UnbumpablePin`,
+  a collected failure) instead of emitting an invalid `branch` + `rev`
+  manifest or silently aliasing the first matching entry. Until full
+  multi-pin awareness exists, sema-engine — which spirit pins at
+  deliberate old revisions — stays out of the first configured set.
 - **Transitive gaps** (`src/transitive_lock.rs`) — a typed lock edit cannot
   invent new transitive entries when the dependency's own dependency set
   changed at the target revision. The accepted controlled fallback for
@@ -176,13 +186,21 @@ each is a typed model:
 - **`flake.lock`** (`src/flake_lock.rs`) — typed JSON via serde
   (`FlakeLock`, `LockNode`, `LockedSource`, `OriginalSource`; unknown
   fields preserved through typed remainders). A bump sets `locked.rev`
-  in-type, obtains `narHash` and `lastModified` through the
+  in-type and obtains `narHash` and `lastModified` through the
   `NarHashSource` boundary — `nix flake prefetch --json`, the **only**
   external command in the whole pin-editing path, because the narHash is
-  the one value text manipulation cannot produce — and, on a cascade pin,
-  sets `original.ref` to `synchronizer` so a later `nix flake update`
-  follows the same branch the lock points into. Reserialization is Nix's
-  canonical lock rendering (two-space indent, sorted keys).
+  the one value text manipulation cannot produce. The node's `original`
+  is **always preserved**, on cascade pins too: the locked `rev` alone
+  carries the cascade. Editing `original.ref` to follow the synchronizer
+  branch is wrong and was retired — Nix re-resolves originals from
+  `flake.nix` on update, so a lock whose `original` mismatches what
+  `flake.nix` declares is discarded and the input re-locked from the
+  declaration (back to the `main` tip), evaluating the *old* content and
+  silently reintroducing the exact skew this tool exists to kill
+  (empirically proven against Nix 2.34.6 for git- and github-type
+  inputs; the github-type witness is `tests/nix_resolution.rs`).
+  Reserialization is Nix's canonical lock rendering (two-space indent,
+  sorted keys).
 - **`flake.nix`** (`src/flake_manifest.rs`) — edited only where a pin
   lives in the input URL itself (`github:owner/repo/<rev-or-ref>`) rather
   than in the lock. The URL literal is located and parsed by a winnow
@@ -307,6 +325,14 @@ run — and their own verifies surface the breakage as collected failures
   host over ssh, per the push-first builder doctrine: the builder only sees
   pushed refs. Wide `nix flake check` sweeps remain deliberately out (they
   are loop-killers; kink ledger #24).
+- **Absence is data; failure is failure.** The check enumeration
+  (`CheckEnumeration`) answers an absent `checks.<system>` attribute as an
+  empty list inside the eval expression itself, so the default-build
+  fallback happens only for genuine absence. An ssh or eval failure while
+  enumerating is a collected verify failure — it never silently downgrades
+  the gate to a plain build. The report records which gate class passed
+  (`Verification::Verified` carries `WireChecks | DefaultPackage`), so a
+  downgraded verify stays visible.
 - A verification failure is report data, never a crate error.
 
 ## 9. Failure policy — collect, keep going
@@ -319,6 +345,11 @@ detail }`, the affected repository's outcome reflects it, and the ascent
 continues with every repository it can still process. All failures are
 reported together at the end. If role resolution itself fails, bumps and
 pushes still proceed and every verification reports `NotAttempted`.
+
+A cycle is diagnosed only among the graph's own members. A configured
+producer whose fetch or load failed is **not** a cycle: its consumers are
+still placed in the ascent and their unresolvable edges are collected as
+Resolve failures (`Error::ProducerUnavailable`), keeping the run going.
 
 ## 10. Report (NOTA)
 
@@ -341,9 +372,11 @@ label the schema; struct records are untagged on the wire.
 ;;     (Bumped [<applied-bump>] (PushedBranch <branch-name> <tip-revision>))
 ;;     (BumpFailed <stage>) — detail in the failures vector
 ;;   verification:
-;;     (Verified <builder-host>)
+;;     (Verified (<builder-host> <verification-gate>))
 ;;     (VerifyFailed <builder-host>) — detail in the failures vector
 ;;     NotAttempted
+;;   verification-gate: WireChecks | DefaultPackage — which verify class
+;;     passed, so a default-build downgrade stays visible in the report
 
 ;; AppliedBump (untagged)
 (<dependency-name> <pin-layer> <previous> <next>)
@@ -381,8 +414,10 @@ branches pushed (`PushedBranch`), per-level verify results
                            transitive gap => cargo update --precise fallback
           CargoManifest  — redirect branch main -> synchronizer   (cascade pins only)
           FlakeLock      — set rev; prefetch narHash (the only nix call
-                           in the pin path); set original.ref     (cascade pins only)
+                           in the pin path); original always preserved
           FlakeManifest  — rewrite rev-in-URL                     (URL-pinned inputs only)
+          unbumpable pin (deliberate rev/tag pin, same-name aliasing)
+                         => fail loud, collected, pin left alone
      e  commit the edited files on top of the remote main tip;
         push the tool-owned synchronizer branch (force)
      f  ledger.record(component, pushed tip)
@@ -433,6 +468,8 @@ tests/
 ├── flake_lock.rs          byte round-trip + rev-set fidelity witnesses
 ├── flake_manifest.rs      scanner + span-rewrite witnesses
 ├── git_repository.rs      gix object-level commit witness (no ref moves)
+├── nix_resolution.rs      stateful builder probe (ignored): real Nix resolves a
+│                          cascaded lock to the pinned rev (Preserve semantics)
 ├── report.rs              report round-trip witness
 ├── role_resolution.rs     cluster-proposal role→host witnesses
 ├── topology.rs            discovery-by-repository-identity + level/cycle witnesses
@@ -460,6 +497,15 @@ Test seeds — each of these should become a witness or review gate:
   input-URL span rewrite of a parsed literal.
 - A pin write is non-destructive: comments, alignment, and layout of
   everything untouched survive byte-for-byte.
+- A flake-lock repin never edits a node's `original`: the locked rev alone
+  carries the cascade, because Nix discards a lock whose original
+  mismatches `flake.nix` and re-locks from the declaration.
+- A verify never silently downgrades: check-enumeration failure is a
+  collected failure (only genuine absence falls back to the default
+  build), and a passed verification names its gate class in the report.
+- A deliberately rev- or tag-pinned dependency, or a package aliased by
+  several same-name entries, is never bumped mechanically: the bump fails
+  loud as a collected failure and the pin is left alone.
 - The pin-editing path shells out only for `nix flake prefetch` (narHash)
   and, on a detected transitive gap, the controlled
   `cargo update --precise` fallback in a scratch tree; build execution

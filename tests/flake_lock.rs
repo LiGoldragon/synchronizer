@@ -1,8 +1,8 @@
 //! Witnesses for the typed flake.lock model: byte round-trip fidelity in
 //! Nix's own rendering, and the rev-set repin.
 
-use synchronizer::flake_lock::{FlakeLock, InputName, OriginalReferenceEdit, PrefetchedSource};
-use synchronizer::types::{BranchName, CommitIdentifier, ComponentName, NarHash};
+use synchronizer::flake_lock::{FlakeLock, InputName, PrefetchedSource};
+use synchronizer::types::{CommitIdentifier, ComponentName, NarHash};
 
 /// A lock in Nix's exact rendering: two-space indent, sorted keys, a
 /// `flake = false` node, a third-party node, and a component node.
@@ -101,8 +101,15 @@ fn github_inputs_expose_only_direct_root_inputs() {
     );
 }
 
+/// A cascade repin moves only `locked.rev`, `locked.narHash`, and
+/// `locked.lastModified`. The node's `original` — what `flake.nix` asked
+/// for — is preserved byte-for-byte: Nix re-resolves originals from
+/// `flake.nix` on update, so an original edited to follow the synchronizer
+/// branch would be discarded and the input re-locked to `main`, evaluating
+/// the old content (proven against Nix 2.34.6). The locked rev alone
+/// carries the cascade.
 #[test]
-fn repin_moves_exactly_the_rev_set_and_preserves_every_other_byte() {
+fn repin_moves_exactly_the_rev_set_and_preserves_the_original() {
     let component = ComponentName::new("signal-router");
     let mut lock = FlakeLock::from_json_text(LOCK_TEXT, &component).expect("lock decodes");
     let previous = lock
@@ -114,7 +121,6 @@ fn repin_moves_exactly_the_rev_set_and_preserves_every_other_byte() {
                 NarHash::new("sha256-newnewnewnewnewnewnewnewnewnewnewnewnew="),
                 1_760_000_000,
             ),
-            OriginalReferenceEdit::FollowBranch(BranchName::synchronizer()),
         )
         .expect("the direct root input repins");
     assert_eq!(
@@ -134,14 +140,19 @@ fn repin_moves_exactly_the_rev_set_and_preserves_every_other_byte() {
         .replace(
             "1111111111111111111111111111111111111111",
             "2222222222222222222222222222222222222222",
-        )
-        .replace(
-            "        \"owner\": \"LiGoldragon\",\n        \"ref\": \"main\",",
-            "        \"owner\": \"LiGoldragon\",\n        \"ref\": \"synchronizer\",",
         );
     assert_eq!(
         rendered, expected,
-        "locked.rev, narHash, lastModified, and original.ref move; nixpkgs, \
-         rust-analyzer-src, and all layout survive byte-for-byte"
+        "locked.rev, narHash, and lastModified move; original.ref stays \
+         main, and nixpkgs, rust-analyzer-src, and all layout survive \
+         byte-for-byte"
+    );
+    assert!(
+        rendered.contains("\"ref\": \"main\","),
+        "the signal-frame original keeps asking for what flake.nix declares"
+    );
+    assert!(
+        !rendered.contains("\"ref\": \"synchronizer\""),
+        "no original is redirected to the synchronizer branch"
     );
 }

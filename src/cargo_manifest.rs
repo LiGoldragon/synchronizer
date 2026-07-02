@@ -11,20 +11,37 @@
 use serde::Deserialize;
 use toml::Table;
 
-use crate::error::Error;
+use crate::error::{Error, UnbumpablePinReason};
 use crate::toml_document::PreservedTomlDocument;
 use crate::topology::PinLayer;
 use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl, TomlText};
 
-/// A dependency key in a Cargo dependency table. This is a *package* name,
-/// which may differ from the repository name (`nota-next` publishes `nota`);
-/// component matching goes through the git URL, never this name.
+/// A resolved *package* name: the dependency table key with a `package =`
+/// rename applied. It may differ from both the table key (`nota-next =
+/// { package = "nota", ... }`) and the repository name; component matching
+/// goes through the git URL, never this name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub struct DependencyName(String);
 
 impl DependencyName {
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The literal key of one entry in a Cargo dependency table — the name the
+/// TOML document is addressed by. Under a `package =` rename it differs
+/// from the [`DependencyName`] the entry resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyKey(String);
+
+impl DependencyKey {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
     }
 
     pub fn as_str(&self) -> &str {
@@ -112,22 +129,57 @@ impl CargoManifest {
     ///
     /// This is the cascade edit: a consumer pinning a bumped dependency is
     /// redirected from `branch = "main"` to `branch = "synchronizer"` so
-    /// Cargo can reach the locked revision on a fresh clone. Comments and
-    /// layout survive: only the one value changes.
+    /// Cargo can reach the locked revision on a fresh clone. The document
+    /// is addressed by the entry's table *key*, which under a `package =`
+    /// rename differs from the resolved package name. Comments and layout
+    /// survive: only the one value changes.
+    ///
+    /// A deliberately rev- or tag-pinned entry, or a package pinned by
+    /// several same-name entries, fails loud ([`Error::UnbumpablePin`]):
+    /// inserting `branch` beside `rev` yields an invalid manifest, and
+    /// addressing by name would silently alias the first match.
     pub fn redirect_git_dependency(
         &mut self,
         name: &DependencyName,
         reference: GitReference,
     ) -> Result<GitReference, Error> {
-        let (kind, previous) = self
+        let mut matches: Vec<(DependencyTableKind, DependencyKey, GitSource)> = self
             .git_dependencies_with_tables()
             .into_iter()
-            .find(|(_, entry_name, _)| entry_name == name)
-            .map(|(kind, _, source)| (kind, source.reference))
-            .ok_or_else(|| Error::NotComponentDependency {
+            .filter(|(_, _, entry_name, _)| entry_name == name)
+            .map(|(kind, key, _, source)| (kind, key, source))
+            .collect();
+        if matches.len() > 1 {
+            return Err(Error::UnbumpablePin {
                 consumer: self.component.clone(),
                 dependency: name.as_str().to_string(),
-            })?;
+                reason: UnbumpablePinReason::MultipleEntries,
+            });
+        }
+        let Some((kind, key, source)) = matches.pop() else {
+            return Err(Error::NotComponentDependency {
+                consumer: self.component.clone(),
+                dependency: name.as_str().to_string(),
+            });
+        };
+        let previous = source.reference;
+        match &previous {
+            GitReference::Revision(_) => {
+                return Err(Error::UnbumpablePin {
+                    consumer: self.component.clone(),
+                    dependency: name.as_str().to_string(),
+                    reason: UnbumpablePinReason::DeliberateRevisionPin,
+                });
+            }
+            GitReference::Tag(_) => {
+                return Err(Error::UnbumpablePin {
+                    consumer: self.component.clone(),
+                    dependency: name.as_str().to_string(),
+                    reason: UnbumpablePinReason::DeliberateTagPin,
+                });
+            }
+            GitReference::Branch(_) | GitReference::DefaultBranch => {}
+        }
         let branch = match &reference {
             GitReference::Branch(branch) => branch.as_str().to_string(),
             other => {
@@ -141,11 +193,11 @@ impl CargoManifest {
         let document = self.document.as_document_mut();
         let entry = document
             .get_mut(kind.table_key())
-            .and_then(|table| table.get_mut(name.as_str()))
+            .and_then(|table| table.get_mut(key.as_str()))
             .ok_or_else(|| Error::ManifestEncode {
                 component: self.component.clone(),
                 layer: PinLayer::CargoManifest,
-                detail: format!("dependency {} not found in document", name.as_str()),
+                detail: format!("dependency key {} not found in document", key.as_str()),
             })?;
         match entry {
             toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
@@ -159,8 +211,8 @@ impl CargoManifest {
                     component: self.component.clone(),
                     layer: PinLayer::CargoManifest,
                     detail: format!(
-                        "dependency {} is not a table entry: {other:?}",
-                        name.as_str()
+                        "dependency key {} is not a table entry: {other:?}",
+                        key.as_str()
                     ),
                 });
             }
@@ -195,15 +247,20 @@ impl CargoManifest {
 
     fn git_dependencies_with_tables(
         &self,
-    ) -> Vec<(DependencyTableKind, DependencyName, GitSource)> {
+    ) -> Vec<(
+        DependencyTableKind,
+        DependencyKey,
+        DependencyName,
+        GitSource,
+    )> {
         DependencyTableKind::ALL
             .iter()
             .flat_map(|kind| {
                 self.read
                     .table(*kind)
-                    .git_entries()
+                    .git_entries_with_keys()
                     .into_iter()
-                    .map(move |(name, source)| (*kind, name, source))
+                    .map(move |(key, name, source)| (*kind, key, name, source))
             })
             .collect()
     }
@@ -276,10 +333,18 @@ impl PackageVersion {
 pub struct DependencyTable(Table);
 
 impl DependencyTable {
-    /// The git-sourced entries of this table: dependency key (with a
-    /// `package =` rename applied as the resolved package name) and parsed
-    /// git source.
+    /// The git-sourced entries of this table: resolved package name (the
+    /// key with a `package =` rename applied) and parsed git source.
     fn git_entries(&self) -> Vec<(DependencyName, GitSource)> {
+        self.git_entries_with_keys()
+            .into_iter()
+            .map(|(_, name, source)| (name, source))
+            .collect()
+    }
+
+    /// The git-sourced entries of this table with their literal table keys
+    /// — the names the format-preserving document is addressed by.
+    fn git_entries_with_keys(&self) -> Vec<(DependencyKey, DependencyName, GitSource)> {
         self.0
             .iter()
             .filter_map(|(key, value)| {
@@ -299,6 +364,7 @@ impl DependencyTable {
                     GitReference::DefaultBranch
                 };
                 Some((
+                    DependencyKey::new(key),
                     DependencyName::new(package),
                     GitSource {
                         url: RepositoryUrl::new(url),

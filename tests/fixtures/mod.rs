@@ -230,7 +230,9 @@ impl Verifier for FixtureVerifier {
         self.verified
             .borrow_mut()
             .push((component.clone(), revision.clone()));
-        synchronizer::build_verify::VerificationOutcome::Verified
+        synchronizer::build_verify::VerificationOutcome::Verified(
+            synchronizer::report::VerificationGate::WireChecks,
+        )
     }
 }
 

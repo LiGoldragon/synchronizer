@@ -2,7 +2,7 @@
 
 use synchronizer::report::{
     Action, AppliedBump, BumpRecord, Failure, FailureDetail, FailureStage, LevelOutcome, PinValue,
-    PushedBranch, RepositoryOutcome, SynchronizerReport, Verification,
+    PushedBranch, RepositoryOutcome, SynchronizerReport, Verification, VerificationGate,
 };
 use synchronizer::topology::PinLayer;
 use synchronizer::types::{BranchName, BuilderHost, CommitIdentifier, ComponentName, Timestamp};
@@ -47,7 +47,28 @@ fn example_report() -> SynchronizerReport {
                         ],
                         PushedBranch::new(BranchName::synchronizer(), tip.clone()),
                     )),
-                    Verification::VerifyFailed(host),
+                    Verification::VerifyFailed(host.clone()),
+                )],
+            ),
+            LevelOutcome::new(
+                2,
+                vec![RepositoryOutcome::new(
+                    ComponentName::new("signal-harness"),
+                    Action::Bumped(BumpRecord::new(
+                        vec![AppliedBump::new(
+                            router.clone(),
+                            PinLayer::FlakeLock,
+                            PinValue::Revision(old.clone()),
+                            PinValue::Revision(tip.clone()),
+                        )],
+                        PushedBranch::new(
+                            BranchName::synchronizer(),
+                            CommitIdentifier::new("dddddddddddddddddddddddddddddddddddddddd"),
+                        ),
+                    )),
+                    // The gate class is wire truth: a default-build pass
+                    // stays visible as the downgrade it is.
+                    Verification::Verified(host, VerificationGate::DefaultPackage),
                 )],
             ),
         ],

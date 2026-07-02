@@ -77,7 +77,9 @@ impl VersionResolver {
     }
 
     /// The cascade rule: ledger hit means `SynchronizerTip`, otherwise
-    /// `RemoteMainTip`.
+    /// `RemoteMainTip`. A producer with no known main tip was configured
+    /// but not loaded this run (its fetch failed): the edge cannot resolve
+    /// and the failure is collected, never fatal.
     pub fn resolve(&self, component: &ComponentName) -> Result<ResolvedTarget, Error> {
         if let Some(tip) = self.ledger.synchronizer_tip_of(component) {
             return Ok(ResolvedTarget::SynchronizerTip(tip.clone()));
@@ -85,7 +87,9 @@ impl VersionResolver {
         self.main_tips
             .get(component)
             .map(|tip| ResolvedTarget::RemoteMainTip(tip.clone()))
-            .ok_or_else(|| Error::UnknownComponent(component.clone()))
+            .ok_or_else(|| Error::ProducerUnavailable {
+                producer: component.clone(),
+            })
     }
 
     /// Record a bump so later consumers resolve to the pushed tip.

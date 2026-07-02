@@ -4,7 +4,10 @@
 //! build and launch the daemons, those checks are the verify; only where no
 //! such check exists does the verify fall back to the default `nix build`.
 
-use synchronizer::build_verify::{CheckName, VerificationTarget, WireCheckClassifier};
+use synchronizer::build_verify::{
+    CheckEnumeration, CheckName, VerificationTarget, WireCheckClassifier,
+};
+use synchronizer::report::VerificationGate;
 use synchronizer::types::FlakeReference;
 
 fn names(raw: &[&str]) -> Vec<CheckName> {
@@ -67,5 +70,67 @@ fn wire_checks_address_the_pushed_revision_per_system() {
             "github:LiGoldragon/introspect/2222222222222222222222222222222222222222#checks.x86_64-linux.test-daemon-socket"
                 .to_string()
         ]
+    );
+}
+
+#[test]
+fn the_verification_target_names_its_gate_class_for_the_report() {
+    assert_eq!(
+        VerificationTarget::WireChecks(names(&["test-daemon-socket"])).gate(),
+        VerificationGate::WireChecks
+    );
+    assert_eq!(
+        VerificationTarget::DefaultPackage.gate(),
+        VerificationGate::DefaultPackage
+    );
+}
+
+/// The check-enumeration expression treats an absent `checks` attribute as
+/// data — it answers `[ ]` instead of failing — so the *only* way the
+/// enumeration command fails is a genuine eval or transport failure, which
+/// must never silently downgrade the verify to a plain build.
+#[test]
+fn check_enumeration_answers_absence_as_data_not_as_failure() {
+    let reference = FlakeReference::new(
+        "github:LiGoldragon/introspect/2222222222222222222222222222222222222222",
+    );
+    let enumeration = CheckEnumeration::new(reference, "x86_64-linux");
+    let command = enumeration.command();
+    assert!(
+        command.contains("builtins.getFlake"),
+        "the expression opens the locked flake reference: {command}"
+    );
+    assert!(
+        command.contains("flake ? checks && flake.checks ? \"x86_64-linux\""),
+        "absence is guarded in the expression itself: {command}"
+    );
+    assert!(
+        command.contains("else [ ]"),
+        "an absent checks attribute answers an empty list: {command}"
+    );
+}
+
+/// An undecodable enumeration reply is a failure, never an empty check
+/// list: an empty list would legitimize the default-build fallback.
+#[test]
+fn undecodable_check_enumeration_is_a_failure_not_an_empty_list() {
+    let reference = FlakeReference::new(
+        "github:LiGoldragon/introspect/2222222222222222222222222222222222222222",
+    );
+    let enumeration = CheckEnumeration::new(reference, "x86_64-linux");
+    let decoded = enumeration
+        .decode("[\"build\",\"harness-daemon-answers-status-readiness\"]\n")
+        .expect("a JSON name list decodes");
+    let decoded_names: Vec<&str> = decoded.iter().map(|name| name.as_str()).collect();
+    assert_eq!(
+        decoded_names,
+        vec!["build", "harness-daemon-answers-status-readiness"]
+    );
+    let error = enumeration
+        .decode("error: cannot connect to socket\n")
+        .expect_err("garbage output is a failure, not an empty check list");
+    assert!(
+        error.contains("undecodable"),
+        "the failure names the decode problem: {error}"
     );
 }

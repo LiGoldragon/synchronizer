@@ -58,6 +58,24 @@ pub enum Error {
         dependency: String,
     },
 
+    /// A pin the mechanical bump must not touch: deliberately rev- or
+    /// tag-pinned, or aliased by several same-name entries. Bumping would
+    /// emit an invalid or lying manifest, so the bump fails loud and is
+    /// collected; the pin is left alone. Full multi-pin awareness is
+    /// future work.
+    #[error("unbumpable pin: {consumer:?} -> {dependency}: {reason}")]
+    UnbumpablePin {
+        consumer: ComponentName,
+        dependency: String,
+        reason: UnbumpablePinReason,
+    },
+
+    /// A consumer pins a producer whose tip is unavailable this run — its
+    /// fetch or load failed — so no target revision exists for the edge.
+    /// Collected as a Resolve failure; the ascent continues.
+    #[error("producer unavailable this run (its fetch or load failed): {producer:?}")]
+    ProducerUnavailable { producer: ComponentName },
+
     /// The discovered dependency graph is not a DAG. Run-fatal: a cycle
     /// admits no topological ascent.
     #[error("dependency cycle among: {members:?}")]
@@ -104,4 +122,30 @@ pub enum GitOperation {
     ObjectRead,
     Commit,
     Push,
+}
+
+/// Why a pin cannot be bumped mechanically, for [`Error::UnbumpablePin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnbumpablePinReason {
+    /// The entry pins an exact revision on purpose (`rev = "..."` /
+    /// `?rev=`); a mechanical bump would override a deliberate pin or
+    /// emit an invalid `branch` + `rev` combination.
+    DeliberateRevisionPin,
+    /// The entry pins a tag on purpose; a mechanical bump would lie about
+    /// what the tag names.
+    DeliberateTagPin,
+    /// Several same-name entries pin the producer; addressing by name
+    /// would silently alias the first match.
+    MultipleEntries,
+}
+
+impl std::fmt::Display for UnbumpablePinReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::DeliberateRevisionPin => "the entry deliberately pins an exact revision",
+            Self::DeliberateTagPin => "the entry deliberately pins a tag",
+            Self::MultipleEntries => "several same-name entries pin the producer",
+        };
+        formatter.write_str(text)
+    }
 }

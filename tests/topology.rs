@@ -170,3 +170,33 @@ fn ascent_levels_put_leaves_first_and_reject_cycles() {
         Err(Error::DependencyCycle { members }) if members.len() == 2
     ));
 }
+
+/// A configured producer whose manifests never loaded (its fetch failed)
+/// is not a dependency cycle: its consumers are still placed in the
+/// ascent, and their unresolvable edges become collected failures instead
+/// of killing the run (§9 collect-and-continue).
+#[test]
+fn unloaded_producers_do_not_masquerade_as_cycles() {
+    // signal-frame is configured but absent from the loaded manifest set:
+    // its fetch failed. The router still declares the dependency.
+    let router = cargo_component(
+        "signal-router",
+        &[("signal-frame", "signal-frame", "signal-frame")],
+    );
+    let config = config_for(&["signal-frame", "signal-router"]);
+    let graph = DependencyGraph::discover(&config, &[router]).expect("fixture topology discovers");
+    assert!(
+        !graph
+            .dependencies_of(&ComponentName::new("signal-router"))
+            .is_empty(),
+        "the edge to the unloaded producer exists"
+    );
+    let levels = graph
+        .ascent_levels()
+        .expect("an unloaded producer is not a cycle");
+    assert_eq!(
+        levels.levels(),
+        &[vec![ComponentName::new("signal-router")]],
+        "the consumer is placed; its resolution failure is collected later"
+    );
+}

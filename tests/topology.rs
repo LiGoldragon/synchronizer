@@ -4,25 +4,19 @@ mod fixtures;
 
 use std::collections::BTreeMap;
 
-use fixtures::{FixtureRepository, revision};
+use fixtures::{FixtureRepository, revision, standard_config};
 use synchronizer::component_manifests::ComponentManifests;
-use synchronizer::configuration::{
-    ClusterConfiguration, Component, ComponentCheckout, Forge, ForgeOwner, SynchronizerConfig,
-};
+use synchronizer::configuration::{Component, ComponentCheckout, SynchronizerConfig};
 use synchronizer::error::Error;
 use synchronizer::topology::{DependencyGraph, LocalPinName, PinLayer};
-use synchronizer::types::{AbsolutePath, BuilderRole, ComponentName};
+use synchronizer::types::ComponentName;
 
 fn config_for(components: &[&str]) -> SynchronizerConfig {
-    SynchronizerConfig::new(
-        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
-        AbsolutePath::new("/git/github.com/LiGoldragon"),
+    standard_config(
         components
             .iter()
             .map(|name| Component::new(ComponentName::new(*name), ComponentCheckout::AtRoot))
             .collect(),
-        BuilderRole::new("NixBuilder"),
-        ClusterConfiguration::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
     )
 }
 

@@ -41,10 +41,10 @@ fn cascade_redirect_preserves_comments_and_layout() {
     let previous = manifest
         .redirect_git_dependency(
             &DependencyName::new("signal-frame"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
         )
         .expect("declared git dependency redirects");
-    assert_eq!(previous, GitReference::Branch(BranchName::main()));
+    assert_eq!(previous, GitReference::Branch(BranchName::new("main")));
 
     let rendered = manifest.to_toml_text();
     let expected = COMMENTED_MANIFEST.replace(
@@ -88,10 +88,10 @@ fn cascade_redirect_addresses_renamed_dependencies_by_table_key() {
     let previous = manifest
         .redirect_git_dependency(
             &DependencyName::new("nota"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
         )
         .expect("a renamed dependency redirects through its table key");
-    assert_eq!(previous, GitReference::Branch(BranchName::main()));
+    assert_eq!(previous, GitReference::Branch(BranchName::new("main")));
     let rendered = manifest.to_toml_text();
     let expected = RENAMED_AND_PINNED_MANIFEST.replace(
         "nota-next   = { package = \"nota\", git = \"https://github.com/LiGoldragon/nota-next.git\", branch = \"main\" }",
@@ -116,7 +116,7 @@ fn deliberate_revision_pins_fail_loud_instead_of_emitting_invalid_manifests() {
     let error = manifest
         .redirect_git_dependency(
             &DependencyName::new("sema-engine"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
         )
         .expect_err("a rev-pinned dependency must not be redirected");
     assert!(
@@ -146,7 +146,7 @@ fn a_package_aliased_by_several_entries_fails_loud() {
     let error = manifest
         .redirect_git_dependency(
             &DependencyName::new("signal-frame"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
         )
         .expect_err("an aliased package must not be redirected by first match");
     assert!(

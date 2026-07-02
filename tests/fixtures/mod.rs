@@ -13,19 +13,50 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use synchronizer::build_verify::Verifier;
-use synchronizer::configuration::Forge;
-use synchronizer::driver::{RepositoryOpener, VerifierSource};
+use synchronizer::build_verify::{Verifier, VerifyPolicy, WireCheckWord};
+use synchronizer::configuration::{
+    BranchScheme, BuilderResolution, ClusterSource, CommitAuthor, Component, Forge, ForgeOwner,
+    SynchronizerConfig,
+};
+use synchronizer::driver::{BuilderHostResolver, RepositoryOpener, VerifierSource};
 use synchronizer::error::Error;
 use synchronizer::flake_lock::{NarHashSource, PinnedFlakeReference, PrefetchedSource};
 use synchronizer::git_repository::{
     CommitMessage, ComponentRepository, FileEdit, RepositoryFilePath, TreeFile,
 };
-use synchronizer::role_resolution::ClusterRoleDirectory;
 use synchronizer::transitive_lock::{TransitiveLockRequest, TransitiveLockResolver};
 use synchronizer::types::{
-    BuilderHost, BuilderRole, CommitIdentifier, ComponentName, NarHash, RepositoryUrl, TomlText,
+    AbsolutePath, AuthorEmail, AuthorName, BranchName, BuilderHost, BuilderRole, CommitIdentifier,
+    ComponentName, NarHash, RepositoryUrl, TomlText,
 };
+
+/// The standard criome-shaped test configuration used by the ascent,
+/// topology, and resolver witnesses: `LiGoldragon` forge, `main`/`synchronizer`
+/// branch scheme, cluster-role builder resolution, wire-exercising verify.
+/// The generic (non-criome) paths are witnessed separately in
+/// `tests/configuration.rs` and `tests/driver.rs`.
+pub fn standard_config(components: Vec<Component>) -> SynchronizerConfig {
+    SynchronizerConfig::new(
+        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
+        AbsolutePath::new("/git/github.com/LiGoldragon"),
+        components,
+        BranchScheme::new(BranchName::new("main"), BranchName::new("synchronizer")),
+        BuilderResolution::ClusterRole(
+            BuilderRole::new("NixBuilder"),
+            ClusterSource::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
+        ),
+        VerifyPolicy::WireExercising(
+            ["daemon", "daemons", "socket", "sockets", "wire"]
+                .iter()
+                .map(|word| WireCheckWord::new(*word))
+                .collect(),
+        ),
+        CommitAuthor::new(
+            AuthorName::new("synchronizer"),
+            AuthorEmail::new("noreply@example.net"),
+        ),
+    )
+}
 
 /// A synthetic 40-hex revision from a short tag, so fixture revisions are
 /// stable and readable in assertions.
@@ -236,19 +267,13 @@ impl Verifier for FixtureVerifier {
     }
 }
 
-/// Binds the fixture verifier through the role directory, exercising the
-/// once-per-run resolution path.
+/// Binds the fixture verifier to the resolved host.
 pub struct FixtureVerifierSource {
     pub verified: Rc<RefCell<Vec<(ComponentName, CommitIdentifier)>>>,
 }
 
 impl VerifierSource for FixtureVerifierSource {
-    fn bind(
-        &self,
-        directory: &dyn ClusterRoleDirectory,
-        role: &BuilderRole,
-    ) -> Result<Box<dyn Verifier>, Error> {
-        let host = directory.host_for(role)?;
+    fn bind(&self, host: BuilderHost) -> Result<Box<dyn Verifier>, Error> {
         Ok(Box::new(FixtureVerifier {
             host,
             verified: Rc::clone(&self.verified),
@@ -256,14 +281,15 @@ impl VerifierSource for FixtureVerifierSource {
     }
 }
 
-/// A role directory answering from a fixed map — the ascent witnesses do
-/// not exercise proposal decoding (role_resolution witnesses do).
-pub struct FixtureRoleDirectory {
+/// A builder-host resolver answering with a fixed host — the ascent
+/// witnesses do not exercise cluster-proposal decoding (role_resolution
+/// witnesses do). Stands in for the production `ConfiguredBuilderHost`.
+pub struct FixtureBuilderHost {
     pub host: BuilderHost,
 }
 
-impl ClusterRoleDirectory for FixtureRoleDirectory {
-    fn host_for(&self, _role: &BuilderRole) -> Result<BuilderHost, Error> {
+impl BuilderHostResolver for FixtureBuilderHost {
+    fn resolve(&self) -> Result<BuilderHost, Error> {
         Ok(self.host.clone())
     }
 }

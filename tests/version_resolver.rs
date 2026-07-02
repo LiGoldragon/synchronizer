@@ -4,21 +4,23 @@ mod fixtures;
 
 use std::collections::BTreeMap;
 
-use fixtures::{FixtureRepository, revision};
+use fixtures::{FixtureRepository, revision, standard_config};
 use synchronizer::component_manifests::ComponentManifests;
-use synchronizer::configuration::{
-    ClusterConfiguration, Component, ComponentCheckout, Forge, ForgeOwner, SynchronizerConfig,
-};
+use synchronizer::configuration::{BranchScheme, Component, ComponentCheckout};
 use synchronizer::report::PinValue;
 use synchronizer::topology::{DependencyGraph, PinLayer};
-use synchronizer::types::{AbsolutePath, BranchName, BuilderRole, ComponentName};
+use synchronizer::types::{BranchName, ComponentName};
 use synchronizer::version_resolver::{ResolvedTarget, VersionResolver};
+
+fn scheme() -> BranchScheme {
+    BranchScheme::new(BranchName::new("main"), BranchName::new("synchronizer"))
+}
 
 #[test]
 fn unbumped_dependency_resolves_to_remote_main_tip() {
     let frame = ComponentName::new("signal-frame");
     let tip = revision("frame-main");
-    let resolver = VersionResolver::new(BTreeMap::from([(frame.clone(), tip.clone())]));
+    let resolver = VersionResolver::new(BTreeMap::from([(frame.clone(), tip.clone())]), scheme());
     assert_eq!(
         resolver.resolve(&frame).expect("known component resolves"),
         ResolvedTarget::RemoteMainTip(tip)
@@ -30,7 +32,7 @@ fn bumped_dependency_resolves_to_its_synchronizer_tip() {
     let frame = ComponentName::new("signal-frame");
     let main_tip = revision("frame-main");
     let synchronizer_tip = revision("frame-sync");
-    let mut resolver = VersionResolver::new(BTreeMap::from([(frame.clone(), main_tip)]));
+    let mut resolver = VersionResolver::new(BTreeMap::from([(frame.clone(), main_tip)]), scheme());
     resolver.record_bump(frame.clone(), synchronizer_tip.clone());
     assert_eq!(
         resolver.resolve(&frame).expect("known component resolves"),
@@ -81,22 +83,16 @@ fn consumer_manifests() -> ComponentManifests {
 }
 
 fn graph_for(consumer: &ComponentManifests) -> DependencyGraph {
-    let config = SynchronizerConfig::new(
-        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
-        AbsolutePath::new("/git/github.com/LiGoldragon"),
-        vec![
-            Component::new(
-                ComponentName::new("signal-frame"),
-                ComponentCheckout::AtRoot,
-            ),
-            Component::new(
-                ComponentName::new("signal-router"),
-                ComponentCheckout::AtRoot,
-            ),
-        ],
-        BuilderRole::new("NixBuilder"),
-        ClusterConfiguration::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
-    );
+    let config = standard_config(vec![
+        Component::new(
+            ComponentName::new("signal-frame"),
+            ComponentCheckout::AtRoot,
+        ),
+        Component::new(
+            ComponentName::new("signal-router"),
+            ComponentCheckout::AtRoot,
+        ),
+    ]);
     DependencyGraph::discover(&config, std::slice::from_ref(consumer))
         .expect("fixture topology discovers")
 }
@@ -111,10 +107,13 @@ fn staleness_is_computed_per_layer_against_the_resolved_target() {
 
     // Plain drift: frame's main moved. The lock is stale toward the main
     // tip; the manifest declaration (branch = "main") still reaches it.
-    let resolver = VersionResolver::new(BTreeMap::from([
-        (frame.clone(), revision("frame-new")),
-        (router.clone(), revision("router-main")),
-    ]));
+    let resolver = VersionResolver::new(
+        BTreeMap::from([
+            (frame.clone(), revision("frame-new")),
+            (router.clone(), revision("router-main")),
+        ]),
+        scheme(),
+    );
     let stale = resolver
         .stale_pins(&consumer, &edges)
         .expect("staleness computes");
@@ -132,10 +131,13 @@ fn staleness_is_computed_per_layer_against_the_resolved_target() {
     // Cascade: frame was bumped this run. Both layers must move — the lock
     // to the synchronizer tip, the manifest declaration to the branch that
     // can reach it.
-    let mut cascade_resolver = VersionResolver::new(BTreeMap::from([
-        (frame.clone(), revision("frame-new")),
-        (router.clone(), revision("router-main")),
-    ]));
+    let mut cascade_resolver = VersionResolver::new(
+        BTreeMap::from([
+            (frame.clone(), revision("frame-new")),
+            (router.clone(), revision("router-main")),
+        ]),
+        scheme(),
+    );
     cascade_resolver.record_bump(frame.clone(), revision("frame-sync"));
     let stale = cascade_resolver
         .stale_pins(&consumer, &edges)
@@ -147,7 +149,7 @@ fn staleness_is_computed_per_layer_against_the_resolved_target() {
         .expect("the manifest layer is stale under a cascade");
     assert_eq!(
         manifest_pin.pinned(),
-        &PinValue::Reference(BranchName::main())
+        &PinValue::Reference(BranchName::new("main"))
     );
     assert_eq!(
         manifest_pin.target(),

@@ -6,8 +6,12 @@
 //! trailing fields are `online` and `services`. No hostname exists in the
 //! tool; the selected node name comes entirely from this cluster data.
 
+use std::io::Write;
+
+use synchronizer::configuration::{BuilderResolution, ClusterSource};
+use synchronizer::driver::{BuilderHostResolver, ConfiguredBuilderHost};
 use synchronizer::role_resolution::ClusterRoleView;
-use synchronizer::types::BuilderRole;
+use synchronizer::types::{AbsolutePath, BuilderHost, BuilderRole};
 
 /// Three nodes holding NixBuilder: an offline node with the largest
 /// declared capacity, an online node with capacity 6, and an online node
@@ -59,6 +63,41 @@ fn unheld_roles_fail_loud() {
     assert!(
         view.host_for(&BuilderRole::new("TailnetController"))
             .is_err()
+    );
+}
+
+/// The direct-host strategy needs no cluster surface at all: the configured
+/// host is returned as-is. This is the path for a consumer with no cluster
+/// directory.
+#[test]
+fn direct_host_resolution_needs_no_cluster() {
+    let resolver = ConfiguredBuilderHost::new(BuilderResolution::DirectHost(BuilderHost::new(
+        "buildbox.local",
+    )));
+    assert_eq!(
+        resolver.resolve().expect("a direct host always resolves"),
+        BuilderHost::new("buildbox.local")
+    );
+}
+
+/// The cluster-role strategy resolves through the real CriomOS directory
+/// against a cluster proposal on disk — the production path, end to end. It
+/// selects the same highest-capacity online node the view test proves.
+#[test]
+fn cluster_role_resolution_selects_from_the_proposal() {
+    let mut file = tempfile::NamedTempFile::new().expect("a temp proposal file");
+    file.write_all(fixture_proposal().as_bytes())
+        .expect("the proposal writes");
+    let path = file.path().to_str().expect("the temp path is utf8");
+    let resolver = ConfiguredBuilderHost::new(BuilderResolution::ClusterRole(
+        BuilderRole::new("NixBuilder"),
+        ClusterSource::ClusterProposal(AbsolutePath::new(path)),
+    ));
+    assert_eq!(
+        resolver
+            .resolve()
+            .expect("the cluster role resolves to a host"),
+        BuilderHost::new("prometheus")
     );
 }
 

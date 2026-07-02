@@ -1,24 +1,39 @@
 //! NOTA configuration document.
 //!
-//! The configuration names the participating components and where their
-//! local clones live; it never declares dependency edges (topology is
-//! discovered from manifests) and never names a builder host (only a
-//! CriomOS role). Decoding goes through the canonical NOTA codec only.
+//! The configuration carries every project-specific fact the tool needs; the
+//! tool source carries none. It names the participating components and where
+//! their local clones live, the branch scheme (which mainline branch is the
+//! version target and which staging branch the tool owns), how the
+//! build-verify host is determined, how the verify gate is selected, and the
+//! commit author. It never declares dependency edges (topology is discovered
+//! from manifests) and never names a builder host directly unless the
+//! configuration itself chooses the direct-host strategy. Decoding goes
+//! through the canonical NOTA codec only.
 //!
 //! Schema (strict positional; the root record is an untagged struct per
 //! the canonical codec — the `SynchronizerConfig` label in ARCHITECTURE.md
 //! §3 is schema documentation, not a wire tag):
 //!
 //! ```nota
-//! (<forge> <checkout-root> [<component>] <builder-role> <cluster-configuration>)
+//! (<forge>
+//!  <checkout-root>
+//!  [<component>]
+//!  <branch-scheme>
+//!  <builder-resolution>
+//!  <verify-policy>
+//!  <commit-author>)
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use nota::{NotaDecode, NotaEncode, NotaSource};
 
+use crate::build_verify::VerifyPolicy;
 use crate::error::Error;
-use crate::types::{AbsolutePath, BuilderRole, ComponentName, RepositoryUrl};
+use crate::types::{
+    AbsolutePath, AuthorEmail, AuthorName, BranchName, BuilderHost, BuilderRole, ComponentName,
+    RepositoryUrl,
+};
 
 /// Root configuration document, decoded from NOTA text.
 ///
@@ -29,8 +44,10 @@ pub struct SynchronizerConfig {
     forge: Forge,
     checkout_root: AbsolutePath,
     components: Vec<Component>,
-    builder_role: BuilderRole,
-    cluster_configuration: ClusterConfiguration,
+    branch_scheme: BranchScheme,
+    builder_resolution: BuilderResolution,
+    verify_policy: VerifyPolicy,
+    commit_author: CommitAuthor,
 }
 
 impl SynchronizerConfig {
@@ -38,15 +55,19 @@ impl SynchronizerConfig {
         forge: Forge,
         checkout_root: AbsolutePath,
         components: Vec<Component>,
-        builder_role: BuilderRole,
-        cluster_configuration: ClusterConfiguration,
+        branch_scheme: BranchScheme,
+        builder_resolution: BuilderResolution,
+        verify_policy: VerifyPolicy,
+        commit_author: CommitAuthor,
     ) -> Self {
         Self {
             forge,
             checkout_root,
             components,
-            builder_role,
-            cluster_configuration,
+            branch_scheme,
+            builder_resolution,
+            verify_policy,
+            commit_author,
         }
     }
 
@@ -83,12 +104,20 @@ impl SynchronizerConfig {
         &self.components
     }
 
-    pub fn builder_role(&self) -> &BuilderRole {
-        &self.builder_role
+    pub fn branch_scheme(&self) -> &BranchScheme {
+        &self.branch_scheme
     }
 
-    pub fn cluster_configuration(&self) -> &ClusterConfiguration {
-        &self.cluster_configuration
+    pub fn builder_resolution(&self) -> &BuilderResolution {
+        &self.builder_resolution
+    }
+
+    pub fn verify_policy(&self) -> &VerifyPolicy {
+        &self.verify_policy
+    }
+
+    pub fn commit_author(&self) -> &CommitAuthor {
+        &self.commit_author
     }
 
     fn component(&self, name: &ComponentName) -> Result<&Component, Error> {
@@ -206,17 +235,88 @@ pub enum ComponentCheckout {
     AtPath(AbsolutePath),
 }
 
-/// Where CriomOS builder roles resolve to hosts.
+/// The branch scheme a run works against.
 ///
-/// The confirmed authoritative surface (ARCHITECTURE.md §8, §14 q5) is the
-/// cluster proposal document — the horizon-rs `ClusterProposal` NOTA datom
-/// (e.g. `goldragon/datom.nota`) whose per-node `services` vectors author
-/// every role in the cluster. Cluster flakes carry no role→host output and
-/// the production cluster repository is not a flake; Lojix records
-/// deployment generations, not roles.
+/// Both names are configuration, not tool constants: a consumer whose default
+/// branch is `master` or whose staging branch must avoid a collision names
+/// them here. Nothing in the tool assumes `main` or `synchronizer`.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
-pub enum ClusterConfiguration {
+pub struct BranchScheme {
+    /// The mainline branch: the default version target for a dependency not
+    /// bumped this run, and the branch a cascade redirect moves *away* from.
+    mainline: BranchName,
+    /// The tool-owned staging branch every bump is committed to and
+    /// force-pushed to — never `main`/mainline.
+    staging: BranchName,
+}
+
+impl BranchScheme {
+    pub fn new(mainline: BranchName, staging: BranchName) -> Self {
+        Self { mainline, staging }
+    }
+
+    pub fn mainline(&self) -> &BranchName {
+        &self.mainline
+    }
+
+    pub fn staging(&self) -> &BranchName {
+        &self.staging
+    }
+}
+
+/// How the build-verify host is determined — the generic strategy interface.
+///
+/// The CriomOS cluster-datom resolver is one optional strategy
+/// (`ClusterRole` + [`ClusterSource::ClusterProposal`]), never the only path
+/// and never hard-coded: a consumer with no cluster directory names the host
+/// directly with `DirectHost`. Growth to further strategies happens by new
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub enum BuilderResolution {
+    /// A literal builder host — no cluster, no role indirection.
+    DirectHost(BuilderHost),
+    /// Resolve a role to a host through a cluster source.
+    ClusterRole(BuilderRole, ClusterSource),
+}
+
+/// Where a role resolves to a host — the cluster-directory strategy set.
+///
+/// The confirmed CriomOS surface is the cluster proposal document — the
+/// horizon-rs `ClusterProposal` NOTA datom (e.g. `goldragon/datom.nota`)
+/// whose per-node `services` vectors author every role in the cluster.
+/// Cluster flakes carry no role→host output and the production cluster
+/// repository is not a flake; Lojix records deployment generations, not
+/// roles. This is a pluggable set: other cluster surfaces join by new
+/// variant, and the whole strategy is optional (see
+/// [`BuilderResolution::DirectHost`]).
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub enum ClusterSource {
     /// A cluster proposal document authored in the horizon-rs
     /// `ClusterProposal` schema.
     ClusterProposal(AbsolutePath),
+}
+
+/// The author and committer identity stamped on every bump commit.
+///
+/// Configuration, not a tool constant: the tool holds no name or email of its
+/// own (no `synchronizer@criome.net` baked in). A consumer names their own CI
+/// identity here.
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub struct CommitAuthor {
+    name: AuthorName,
+    email: AuthorEmail,
+}
+
+impl CommitAuthor {
+    pub fn new(name: AuthorName, email: AuthorEmail) -> Self {
+        Self { name, email }
+    }
+
+    pub fn name(&self) -> &AuthorName {
+        &self.name
+    }
+
+    pub fn email(&self) -> &AuthorEmail {
+        &self.email
+    }
 }

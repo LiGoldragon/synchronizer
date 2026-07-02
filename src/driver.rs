@@ -13,10 +13,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::build_verify::{BuildVerifier, VerificationOutcome, Verifier, WireCheckClassifier};
+use crate::build_verify::{BuildVerifier, VerificationOutcome, Verifier, VerifyPolicy};
 use crate::cargo_manifest::{DependencyName, GitReference, PackageVersion};
 use crate::component_manifests::ComponentManifests;
-use crate::configuration::SynchronizerConfig;
+use crate::configuration::{BranchScheme, BuilderResolution, CommitAuthor, SynchronizerConfig};
 use crate::error::Error;
 use crate::flake_lock::{NarHashSource, NixFlakePrefetch, PinnedFlakeReference, PrefetchedSource};
 use crate::git_repository::{
@@ -30,7 +30,7 @@ use crate::role_resolution::{ClusterRoleDirectory, CriomosClusterDirectory};
 use crate::topology::{DependencyGraph, LocalPinName, PinLayer};
 use crate::transitive_lock::{CargoUpdatePrecise, TransitiveLockRequest, TransitiveLockResolver};
 use crate::types::{
-    BranchName, BuilderRole, CommitIdentifier, ComponentName, RepositoryUrl, Timestamp, TomlText,
+    BranchName, BuilderHost, CommitIdentifier, ComponentName, RepositoryUrl, Timestamp, TomlText,
 };
 use crate::version_resolver::{ResolvedTarget, StalePin, VersionResolver};
 
@@ -45,18 +45,25 @@ pub trait RepositoryOpener {
     ) -> Result<Box<dyn ComponentRepository>, Error>;
 }
 
-/// The production opener: in-process gix over the configured clone.
+/// The production opener: in-process gix over the configured clone, carrying
+/// the configured branch scheme and commit author so every opened repository
+/// queries the right mainline, pushes the right staging branch, and stamps
+/// the right author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitRepositoryOpener {
     /// The git binary used for the transport plumbing (ls-remote, fetch,
     /// push), normally `git` from PATH.
     git_binary: String,
+    branch_scheme: BranchScheme,
+    commit_author: CommitAuthor,
 }
 
 impl GitRepositoryOpener {
-    pub fn from_path_environment() -> Self {
+    pub fn from_path_environment(branch_scheme: BranchScheme, commit_author: CommitAuthor) -> Self {
         Self {
             git_binary: "git".to_string(),
+            branch_scheme,
+            commit_author,
         }
     }
 }
@@ -72,42 +79,64 @@ impl RepositoryOpener for GitRepositoryOpener {
             component.clone(),
             clone_path,
             remote_url,
+            self.branch_scheme.clone(),
+            self.commit_author.clone(),
         )?))
     }
 }
 
-/// Binds a verifier to the role-resolved builder host, once per run.
-pub trait VerifierSource {
-    fn bind(
-        &self,
-        directory: &dyn ClusterRoleDirectory,
-        role: &BuilderRole,
-    ) -> Result<Box<dyn Verifier>, Error>;
+/// Resolves the build-verify host once per run, however configuration chose
+/// to determine it (direct host or role through a cluster directory).
+pub trait BuilderHostResolver {
+    fn resolve(&self) -> Result<BuilderHost, Error>;
 }
 
-/// The production source: [`BuildVerifier`] with the workspace's
-/// wire-exercising check classifier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildVerifierSource {
-    classifier: WireCheckClassifier,
+/// The production resolver: dispatches on the configured
+/// [`BuilderResolution`] strategy. A direct host is returned as-is; a cluster
+/// role is resolved through the CriomOS cluster directory. Neither path is
+/// hard-coded — the strategy comes entirely from configuration.
+pub struct ConfiguredBuilderHost {
+    resolution: BuilderResolution,
 }
 
-impl BuildVerifierSource {
-    pub fn workspace() -> Self {
-        Self {
-            classifier: WireCheckClassifier::workspace(),
+impl ConfiguredBuilderHost {
+    pub fn new(resolution: BuilderResolution) -> Self {
+        Self { resolution }
+    }
+}
+
+impl BuilderHostResolver for ConfiguredBuilderHost {
+    fn resolve(&self) -> Result<BuilderHost, Error> {
+        match &self.resolution {
+            BuilderResolution::DirectHost(host) => Ok(host.clone()),
+            BuilderResolution::ClusterRole(role, source) => {
+                CriomosClusterDirectory::new(source.clone()).host_for(role)
+            }
         }
     }
 }
 
+/// Binds a verifier to the resolved builder host, once per run.
+pub trait VerifierSource {
+    fn bind(&self, host: BuilderHost) -> Result<Box<dyn Verifier>, Error>;
+}
+
+/// The production source: [`BuildVerifier`] with the configured verify
+/// policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildVerifierSource {
+    policy: VerifyPolicy,
+}
+
+impl BuildVerifierSource {
+    pub fn new(policy: VerifyPolicy) -> Self {
+        Self { policy }
+    }
+}
+
 impl VerifierSource for BuildVerifierSource {
-    fn bind(
-        &self,
-        directory: &dyn ClusterRoleDirectory,
-        role: &BuilderRole,
-    ) -> Result<Box<dyn Verifier>, Error> {
-        let _ = &self.classifier; // the workspace classifier is the built-in default
-        Ok(Box::new(BuildVerifier::from_role(directory, role)?))
+    fn bind(&self, host: BuilderHost) -> Result<Box<dyn Verifier>, Error> {
+        Ok(Box::new(BuildVerifier::new(host, self.policy.clone())))
     }
 }
 
@@ -115,7 +144,7 @@ impl VerifierSource for BuildVerifierSource {
 pub struct RunBoundaries {
     pub repository_opener: Box<dyn RepositoryOpener>,
     pub nar_hash_source: Box<dyn NarHashSource>,
-    pub role_directory: Box<dyn ClusterRoleDirectory>,
+    pub builder_host_resolver: Box<dyn BuilderHostResolver>,
     pub verifier_source: Box<dyn VerifierSource>,
     pub lock_resolver: Box<dyn TransitiveLockResolver>,
 }
@@ -144,18 +173,25 @@ enum BumpOutcome {
 }
 
 impl SynchronizerRun {
-    /// Compose a run from configuration and the production boundaries.
+    /// Compose a run from configuration and the production boundaries. Every
+    /// project-specific choice — branch scheme, commit author, builder-host
+    /// strategy, verify policy — is read from `config`; none is hard-coded.
     pub fn new(config: SynchronizerConfig) -> Self {
-        let role_directory = Box::new(CriomosClusterDirectory::new(
-            config.cluster_configuration().clone(),
+        let repository_opener = Box::new(GitRepositoryOpener::from_path_environment(
+            config.branch_scheme().clone(),
+            config.commit_author().clone(),
         ));
+        let builder_host_resolver = Box::new(ConfiguredBuilderHost::new(
+            config.builder_resolution().clone(),
+        ));
+        let verifier_source = Box::new(BuildVerifierSource::new(config.verify_policy().clone()));
         Self::with_boundaries(
             config,
             RunBoundaries {
-                repository_opener: Box::new(GitRepositoryOpener::from_path_environment()),
+                repository_opener,
                 nar_hash_source: Box::new(NixFlakePrefetch::from_path_environment()),
-                role_directory,
-                verifier_source: Box::new(BuildVerifierSource::workspace()),
+                builder_host_resolver,
+                verifier_source,
                 lock_resolver: Box::new(CargoUpdatePrecise::from_path_environment()),
             },
         )
@@ -167,10 +203,12 @@ impl SynchronizerRun {
         Self { config, boundaries }
     }
 
-    /// The component name run-scoped failures (role resolution) are
-    /// recorded under.
+    /// The component-name field run-scoped failures (builder-host
+    /// resolution) are recorded under: the tool's own name, since these
+    /// failures belong to no configured component. This is tool identity,
+    /// not project data.
     fn run_scope_component() -> ComponentName {
-        ComponentName::new("synchronizer")
+        ComponentName::new(env!("CARGO_PKG_NAME"))
     }
 
     /// Execute the ascent and return the collected report.
@@ -218,24 +256,32 @@ impl SynchronizerRun {
             .iter()
             .map(|(name, component)| (name.clone(), component.manifests.base_revision().clone()))
             .collect();
-        let mut resolver = VersionResolver::new(main_tips);
+        let mut resolver = VersionResolver::new(main_tips, self.config.branch_scheme().clone());
 
-        // Role resolution happens once; its failure never stops bumps and
-        // pushes — every verification then reports NotAttempted (§9).
-        let verifier: Option<Box<dyn Verifier>> = match self.boundaries.verifier_source.bind(
-            self.boundaries.role_directory.as_ref(),
-            self.config.builder_role(),
-        ) {
-            Ok(verifier) => Some(verifier),
-            Err(error) => {
-                failures.push(Failure::new(
-                    Self::run_scope_component(),
-                    FailureStage::RoleResolution,
-                    FailureDetail::new(error.to_string()),
-                ));
-                None
-            }
-        };
+        // Builder-host resolution happens once; its failure never stops bumps
+        // and pushes — every verification then reports NotAttempted (§9).
+        let verifier: Option<Box<dyn Verifier>> =
+            match self.boundaries.builder_host_resolver.resolve() {
+                Ok(host) => match self.boundaries.verifier_source.bind(host) {
+                    Ok(verifier) => Some(verifier),
+                    Err(error) => {
+                        failures.push(Failure::new(
+                            Self::run_scope_component(),
+                            FailureStage::RoleResolution,
+                            FailureDetail::new(error.to_string()),
+                        ));
+                        None
+                    }
+                },
+                Err(error) => {
+                    failures.push(Failure::new(
+                        Self::run_scope_component(),
+                        FailureStage::RoleResolution,
+                        FailureDetail::new(error.to_string()),
+                    ));
+                    None
+                }
+            };
 
         let mut prefetch_cache: BTreeMap<(ComponentName, String), PrefetchedSource> =
             BTreeMap::new();
@@ -384,7 +430,7 @@ impl SynchronizerRun {
                     component.clone(),
                     Action::Bumped(BumpRecord::new(
                         applied,
-                        PushedBranch::new(BranchName::synchronizer(), tip),
+                        PushedBranch::new(self.config.branch_scheme().staging().clone(), tip),
                     )),
                     verification,
                 )
@@ -609,7 +655,9 @@ impl SynchronizerRun {
             .unwrap_or(GitReference::DefaultBranch);
         let reference = match target {
             ResolvedTarget::RemoteMainTip(_) => existing_reference,
-            ResolvedTarget::SynchronizerTip(_) => GitReference::Branch(BranchName::synchronizer()),
+            ResolvedTarget::SynchronizerTip(_) => {
+                GitReference::Branch(self.config.branch_scheme().staging().clone())
+            }
         };
         let previous = cargo.lock_mut().repin_git_package(
             name,
@@ -637,7 +685,7 @@ impl SynchronizerRun {
             layer: PinLayer::CargoManifest,
             detail: "cargo surface absent".to_string(),
         })?;
-        let next_branch = target.reachable_branch();
+        let next_branch = target.reachable_branch(self.config.branch_scheme());
         let previous = cargo
             .manifest_mut()
             .redirect_git_dependency(name, GitReference::Branch(next_branch.clone()))?;
@@ -645,7 +693,9 @@ impl SynchronizerRun {
             GitReference::Branch(branch) => PinValue::Reference(branch),
             GitReference::Tag(tag) => PinValue::Reference(BranchName::new(tag)),
             GitReference::Revision(revision) => PinValue::Revision(revision),
-            GitReference::DefaultBranch => PinValue::Reference(BranchName::main()),
+            GitReference::DefaultBranch => {
+                PinValue::Reference(self.config.branch_scheme().mainline().clone())
+            }
         };
         Ok(AppliedBump::new(
             producer.clone(),

@@ -5,7 +5,8 @@
 //! such check exists does the verify fall back to the default `nix build`.
 
 use synchronizer::build_verify::{
-    CheckEnumeration, CheckName, VerificationTarget, WireCheckClassifier,
+    CheckEnumeration, CheckName, VerificationTarget, VerifyPolicy, WireCheckClassifier,
+    WireCheckWord,
 };
 use synchronizer::report::VerificationGate;
 use synchronizer::types::FlakeReference;
@@ -14,9 +15,21 @@ fn names(raw: &[&str]) -> Vec<CheckName> {
     raw.iter().map(|name| CheckName::new(*name)).collect()
 }
 
+/// A classifier built from an example project's configured wire words. These
+/// words are configuration, not a tool constant — a different project would
+/// supply a different set.
+fn example_classifier() -> WireCheckClassifier {
+    WireCheckClassifier::new(
+        ["daemon", "daemons", "socket", "sockets", "wire"]
+            .iter()
+            .map(|word| WireCheckWord::new(*word))
+            .collect(),
+    )
+}
+
 #[test]
 fn daemon_launching_checks_are_selected_as_the_gate() {
-    let classifier = WireCheckClassifier::workspace();
+    let classifier = example_classifier();
     // The harness repository's real check-name shapes.
     let target = classifier.select(&names(&[
         "build",
@@ -46,7 +59,7 @@ fn daemon_launching_checks_are_selected_as_the_gate() {
 
 #[test]
 fn repositories_without_wire_checks_fall_back_to_the_default_build() {
-    let classifier = WireCheckClassifier::workspace();
+    let classifier = example_classifier();
     let target = classifier.select(&names(&["build", "clippy", "fmt", "test", "test-basic"]));
     assert_eq!(target, VerificationTarget::DefaultPackage);
     let reference = FlakeReference::new(
@@ -82,6 +95,26 @@ fn the_verification_target_names_its_gate_class_for_the_report() {
     assert_eq!(
         VerificationTarget::DefaultPackage.gate(),
         VerificationGate::DefaultPackage
+    );
+}
+
+/// The configured verify policy chooses whether checks are enumerated at all.
+/// A wire-exercising policy hands over a classifier carrying the project's
+/// words; the default-build policy hands over none, so no enumeration runs
+/// and every repository is verified by the default `nix build`.
+#[test]
+fn the_verify_policy_selects_the_classifier() {
+    let wire = VerifyPolicy::WireExercising(vec![WireCheckWord::new("daemon")]);
+    let classifier = wire
+        .classifier()
+        .expect("a wire-exercising policy carries a classifier");
+    assert_eq!(
+        classifier.select(&names(&["build", "router-daemon-socket"])),
+        VerificationTarget::WireChecks(names(&["router-daemon-socket"]))
+    );
+    assert!(
+        VerifyPolicy::DefaultBuild.classifier().is_none(),
+        "the default-build policy enumerates no checks"
     );
 }
 

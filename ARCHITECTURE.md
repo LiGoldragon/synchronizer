@@ -26,6 +26,55 @@ Direction, backed by psyche statements:
   tool cascades the bumps so the tree stays aligned before daemons meet at
   the wire.
 
+## 0a. The universality law (psyche-signed)
+
+**Only genuinely deterministic behavior lives in code. Everything that
+varies by project is configuration.** The tool carries ZERO project data:
+no criome hostname, repository name, path, account, branch name, role name,
+commit identity, or check-name convention appears anywhere in `src/`. Anyone
+runs it against their own repositories purely by writing their own typed
+NOTA config — no code change, no criome assumption baked in.
+
+What this law puts behind config (§3):
+
+- **Forge** — an abstraction (`Forge` enum with a method surface); GitHub is
+  the sole current implementation, and all forge-shaped URL/flake-reference
+  construction is centralized behind it. A closed enum is the workspace-
+  correct form of this interface: the variant set lives in the type system
+  and decodes from NOTA (a trait object cannot). New forges join by variant.
+- **Branch scheme** — the mainline branch (the default version target) and
+  the staging branch (the tool-owned branch every bump is pushed to) are
+  both configured. Nothing assumes `main` or `synchronizer`.
+- **Builder-host resolution** — a generic strategy interface
+  (`BuilderResolution`): name the host directly (`DirectHost`), or resolve a
+  role through a cluster directory (`ClusterRole`). The CriomOS
+  cluster-datom resolver is **one optional plugin**, never the only path and
+  never hard-coded.
+- **Verify-gate selection** — the wire-exercising check-name words are
+  configured (`VerifyPolicy::WireExercising`), or a project chooses
+  `DefaultBuild` and every repo is verified by the default `nix build`.
+- **Commit author** — the author/committer name and email are configured.
+- **Topology / edge identity** — repository identity comes from the git URL
+  (deterministic parsing) matched against the configured component set and
+  forge owner; edges are never declared.
+
+What this law keeps in code, because it is deterministic, not project-varying:
+
+- **The cascade rule** — bumped-this-run targets the staging tip, everything
+  else targets the mainline tip. Only the *branch names* vary (config); the
+  rule is the algorithm.
+- **The flake-input `original`-preservation rule** — Nix re-resolves an
+  input's `original` from `flake.nix` on update and discards a lock whose
+  `original` mismatches the declaration, re-locking to the declared branch
+  tip. Preserving the `original` and carrying the cascade in `locked.rev`
+  alone is therefore forced by Nix's own lock/declaration reconciliation
+  (empirically proven against Nix 2.34.6, git- and github-type inputs;
+  `tests/nix_resolution.rs`). It is uniform across every Nix-flake project,
+  so making it configurable would only let a consumer choose a broken
+  behavior. It stays in code (§4).
+
+## 0b. Locked design decisions
+
 The following design decisions are psyche-decided and locked. Implementation
 refines them; it does not relitigate them:
 
@@ -35,14 +84,15 @@ refines them; it does not relitigate them:
    data, never string munging;
 3. topology is discovered from the manifests, not declared in configuration;
 4. version resolution is cascade-aware: unchanged dependencies target the
-   latest pushed `main` tip, dependencies bumped this run target their
-   pushed `synchronizer` branch tip;
-5. every modified repo gets a commit pushed to a dedicated `synchronizer`
-   branch — never `main`;
-6. every bump is build-verified on a builder whose host is resolved from a
-   CriomOS role — no hostname anywhere in the tool;
+   latest pushed mainline tip, dependencies bumped this run target their
+   pushed staging-branch tip;
+5. every modified repo gets a commit pushed to a dedicated staging branch —
+   never the mainline;
+6. every bump is build-verified on a builder whose host is resolved through
+   the configured builder-resolution strategy — no hostname anywhere in the
+   tool;
 7. on failure the run keeps going, collects all failures, and reports them
-   together; pushed-but-broken synchronizer branches are accepted;
+   together; pushed-but-broken staging branches are accepted;
 8. the run's output is a NOTA report;
 9. the algorithm is a self-driving topological ascent from the leaves.
 
@@ -75,33 +125,68 @@ failures.
 
 ## 3. Configuration (NOTA)
 
-The configuration names the participants and where their clones live. It
-never declares dependency edges (§5) and never names a host (§8). Decoding
-goes only through the canonical NOTA codec (Spirit record qvb3); the Rust
-schema in `src/configuration.rs` plus round-trip tests own the wire truth —
-the pseudo-NOTA here is documentation. The record names below label the
-schema; on the wire the root is an untagged positional struct record, per
-the codec's untagged-struct rule (a tag is an enum variant, and there is
-one payload shape here).
+The configuration carries every project-specific fact (§0a): the participants
+and where their clones live, the branch scheme, the builder-host strategy,
+the verify policy, and the commit author. It never declares dependency edges
+(§5). Decoding goes only through the canonical NOTA codec (Spirit record
+qvb3); the Rust schema in `src/configuration.rs` plus round-trip tests own
+the wire truth — the pseudo-NOTA here is documentation. The record names
+below label the schema; on the wire the root is an untagged positional struct
+record, per the codec's untagged-struct rule. A multi-field enum variant is a
+tag plus one grouped payload record: `(ClusterRole (<role> <source>))`.
 
 ```nota
 ;; SynchronizerConfig: root configuration document (strict positional, untagged).
-(<forge> <checkout-root> [<component>] <builder-role> <cluster-configuration>)
-;;   forge                : (GitHub <owner>) — forge account holding every component remote
-;;   checkout-root        : absolute path holding local clones named after components
-;;   component            : (<name> <checkout>) — untagged Component record
-;;   builder-role         : bare atom — CriomOS role of the build-verify host, e.g. NixBuilder
-;;   cluster-configuration: (ClusterProposal <absolute-path>) — where roles resolve to hosts
+(<forge>
+ <checkout-root>
+ [<component>]
+ <branch-scheme>
+ <builder-resolution>
+ <verify-policy>
+ <commit-author>)
+;;   forge             : (GitHub <owner>) — forge account holding every component remote
+;;   checkout-root     : absolute path holding local clones named after components
+;;   component         : (<name> <checkout>) — untagged Component record
+;;   branch-scheme     : (<mainline> <staging>) — version-target branch / tool-owned branch
+;;   builder-resolution: how the build-verify host is determined (§8)
+;;   verify-policy     : how the verify gate is selected (§8)
+;;   commit-author     : (<name> <email>) — author/committer of every bump commit
 
 ;; Component: one participating repository (untagged).
 (<name> <checkout>)
-;;   name    : bare atom — the GitHub repository name, e.g. signal-router
+;;   name    : bare atom — the repository name, e.g. signal-router
 ;;   checkout: AtRoot | (AtPath <absolute-path>)
 ;;     AtRoot   — the clone lives at <checkout-root>/<name> (ghq-style layout)
 ;;     (AtPath <absolute-path>) — explicit override
+
+;; BranchScheme: the branch names a run works against (untagged, 2 fields).
+(<mainline> <staging>)
+;;   mainline: bare atom — the default version-target branch, e.g. main / master / trunk
+;;   staging : bare atom — the tool-owned branch every bump is pushed to (force), never mainline
+
+;; BuilderResolution: how the build-verify host is found (closed enum).
+(DirectHost <builder-host>)
+;;   a literal host — no cluster, no role indirection
+(ClusterRole (<builder-role> <cluster-source>))
+;;   resolve <builder-role> to a host through <cluster-source>
+;;     builder-role : bare atom — the cluster role of the host, e.g. NixBuilder
+;;     cluster-source: (ClusterProposal <absolute-path>) — the horizon-rs ClusterProposal datom (§8)
+
+;; VerifyPolicy: how the verify gate is selected (closed enum).
+(WireExercising [<wire-word>])
+;;   enumerate checks; build those whose hyphen/underscore-split name carries a listed
+;;   word (e.g. daemon, socket, wire); fall back to the default package build where none match
+DefaultBuild
+;;   always the default `nix build` of the flake; never enumerate checks
+
+;; CommitAuthor: the identity stamped on every bump commit (untagged, 2 fields).
+(<name> <email>)
+;;   name : bare atom — e.g. synchronizer
+;;   email: bare atom — e.g. ci@example.org
 ```
 
-Example:
+Example (the criome instance lives externally at
+`goldragon/synchronizer.nota`, §3a):
 
 ```nota
 ((GitHub LiGoldragon)
@@ -110,8 +195,24 @@ Example:
   (signal-router AtRoot)
   (signal-harness AtRoot)
   (introspect AtRoot)]
- NixBuilder
- (ClusterProposal /git/github.com/LiGoldragon/goldragon/datom.nota))
+ (main synchronizer)
+ (ClusterRole (NixBuilder (ClusterProposal /git/github.com/LiGoldragon/goldragon/datom.nota)))
+ (WireExercising [daemon daemons socket sockets wire])
+ (synchronizer synchronizer@criome.net))
+```
+
+A fully non-criome instance — a different forge account, a `master`/`bump-train`
+scheme, a directly named host, and the default-build gate — decodes through
+the same schema (witnessed in `tests/configuration.rs`):
+
+```nota
+((GitHub octocat)
+ /home/dev/src
+ [(alpha AtRoot) (beta (AtPath /home/dev/checkouts/beta))]
+ (master bump-train)
+ (DirectHost buildbox.local)
+ DefaultBuild
+ (ci-bot ci@octocat.example))
 ```
 
 Notes:
@@ -120,11 +221,24 @@ Notes:
   field or new variant, never by reordering.
 - `checkout` is a closed enum with a required payload on the override
   variant — no optional in a positional slot.
-- The dedicated branch name `synchronizer` is a design constant, not
-  configuration (`BranchName::synchronizer()`).
-- `(ClusterProposal <absolute-path>)` names the confirmed cluster surface:
-  the horizon-rs `ClusterProposal` datom (§8). Growth to other surfaces
-  happens by new variant.
+- Neither branch name is a tool constant: both are the `BranchScheme` field.
+  The tool holds no `main`/`synchronizer` literal (§0a).
+- `(ClusterProposal <absolute-path>)` names the confirmed CriomOS cluster
+  surface: the horizon-rs `ClusterProposal` datom (§8). It is one optional
+  cluster strategy; growth to other surfaces happens by new `ClusterSource`
+  variant, and a project needing no cluster at all uses `DirectHost`.
+
+## 3a. Where the criome configuration lives
+
+The tool ships no criome data. The criome instance lives in the public
+criome infra-data repository `LiGoldragon/goldragon` as `synchronizer.nota`,
+beside the `datom.nota` cluster proposal its `ClusterRole` strategy reads —
+so the config and the cluster surface it depends on version together in one
+jj-managed, pushed repository. goldragon is data-only (no code, no flake),
+which is exactly the right home for a typed-NOTA config file; primary
+`reports/` and `beads/` are deliberately not used. A consumer validates a
+config edit without a live run via `cargo run --example validate --
+<config.nota>` (decode only; no git, nix, or network).
 
 ## 4. Pin layers
 
@@ -231,21 +345,25 @@ level.
 
 ## 6. Version resolution — the cascade rule
 
-`src/version_resolver.rs`. For each producer a consumer pins:
+`src/version_resolver.rs`. The mainline and staging branch names come from
+the configured `BranchScheme` (§3); the resolver holds the scheme. For each
+producer a consumer pins:
 
 - **Not bumped this run** (a leaf, or a component whose own pins were
-  already aligned): the target is the **latest pushed `main` tip**, queried
-  read-only from the remote (ls-remote; queried once per component at run
-  start).
-- **Bumped this run**: the target is that producer's pushed
-  **`synchronizer` branch tip**, taken from the run's `BumpLedger` — the
-  monotonically growing map of components bumped so far to the tips this
-  run pushed for them.
+  already aligned): the target is the **latest pushed mainline tip**, queried
+  read-only from the remote (ls-remote of the configured mainline branch;
+  queried once per component at run start).
+- **Bumped this run**: the target is that producer's pushed **staging-branch
+  tip**, taken from the run's `BumpLedger` — the monotonically growing map of
+  components bumped so far to the tips this run pushed for them.
 
 ```text
-resolve(producer) = SynchronizerTip(ledger[producer])   if producer in ledger
-                    RemoteMainTip(ls-remote main)        otherwise
+resolve(producer) = SynchronizerTip(ledger[producer])       if producer in ledger
+                    RemoteMainTip(ls-remote <mainline>)      otherwise
 ```
+
+The cascade *rule* is deterministic and lives in code (§0a); only the branch
+names it names are configuration.
 
 A pin is **stale** when the revision it currently locks differs from the
 resolved target's revision. Staleness is computed per edge, so the two
@@ -260,19 +378,22 @@ run — and their own verifies surface the breakage as collected failures
 
 `src/git_repository.rs`. Per modified repository:
 
-- The base of every bump commit is the repository's **remote `main` tip**
+- The base of every bump commit is the repository's **remote mainline tip**
   (fetched into the configured clone's object store). Manifests are read at
   that tip too — never from the working copy, which may be mid-edit by an
   agent.
 - The edits (up to four files: `Cargo.toml`, `Cargo.lock`, `flake.nix`,
   `flake.lock`) become **one commit** built at the object level — blobs,
   tree, commit — with no working copy created or modified. The commit
-  message names the applied bumps.
-- The commit is pushed to the tool-owned **`synchronizer` branch**,
-  overwriting whatever a previous run left there: the branch is staging
-  surface owned by this tool, rebuilt from `main`-tip truth each run, so a
-  force update is the designed behavior. Merge-back to `main` is out of
-  scope. Nothing is ever pushed to any other ref.
+  message names the applied bumps, and the commit's author and committer are
+  the configured `CommitAuthor` (§3) — the tool holds no author identity of
+  its own.
+- The commit is pushed to the tool-owned **staging branch** (the
+  configured `BranchScheme` staging name), overwriting whatever a previous
+  run left there: the branch is staging surface owned by this tool, rebuilt
+  from mainline-tip truth each run, so a force update is the designed
+  behavior. Merge-back to the mainline is out of scope. Nothing is ever
+  pushed to any other ref.
 - Object operations are in-process **gix** (accepted default: typed git
   library; blob/tree/commit built with no working copy). Transport —
   ls-remote, fetch, force-push of the synchronizer branch — is a typed
@@ -281,46 +402,56 @@ run — and their own verifies surface the breakage as collected failures
   `refs/synchronizer/*` namespace so no branch, remote-tracking ref, index,
   or working copy moves.
 
-## 8. Verification — role-resolved builder
+## 8. Verification — configured builder-host strategy
 
-`src/role_resolution.rs` + `src/build_verify.rs`. After each push:
+`src/driver.rs` + `src/role_resolution.rs` + `src/build_verify.rs`. After
+each push:
 
-- The builder host is resolved from the configured CriomOS **role**
-  through the `ClusterRoleDirectory` boundary:
+- The builder host is resolved once per run through the configured
+  `BuilderResolution` strategy (`src/driver.rs::ConfiguredBuilderHost`):
 
   ```rust
-  trait ClusterRoleDirectory {
-      fn host_for(&self, role: &BuilderRole) -> Result<BuilderHost, Error>;
+  enum BuilderResolution {
+      DirectHost(BuilderHost),               // a literal host, no cluster
+      ClusterRole(BuilderRole, ClusterSource) // a role through a cluster directory
   }
   ```
 
-  No hostname exists in the tool or its configuration; in the psyche's
-  cluster the configured role currently resolves to prometheus, and that
-  fact lives in the cluster configuration, not here. Resolution happens
-  once per run.
-- **The confirmed cluster surface** is the cluster proposal document — the
-  horizon-rs `ClusterProposal` NOTA datom (production:
-  `goldragon/datom.nota`) whose per-node `services` vectors author every
-  cluster role, e.g. `(NixBuilder (Some 6))`. Cluster flakes expose no
-  role→host output, the production cluster repository is not a flake, and
-  Lojix records deployment generations, not roles. The production directory
+  No hostname exists in the tool. `DirectHost` returns the configured host
+  as-is — the path for a consumer with no cluster directory. `ClusterRole`
+  resolves through a `ClusterRoleDirectory` boundary
+  (`fn host_for(&self, role) -> Result<BuilderHost, Error>`); the CriomOS
+  cluster-datom resolver is one optional implementation of that boundary,
+  never the only path and never hard-coded.
+- **The CriomOS cluster strategy** (`CriomosClusterDirectory`) reads the
+  cluster proposal document — the horizon-rs `ClusterProposal` NOTA datom
+  (production: `goldragon/datom.nota`) whose per-node `services` vectors
+  author every cluster role, e.g. `(NixBuilder (Some 6))`. Cluster flakes
+  expose no role→host output, the production cluster repository is not a
+  flake, and Lojix records deployment generations, not roles. The directory
   decodes a narrow, count-strict positional view of that datom (root 5
-  fields, node 17 fields) through the canonical codec primitives and
-  selects among the online nodes holding the role by declared capacity
-  (`maximum_jobs`, absent meaning one job), name order breaking ties; a
-  schema-count mismatch fails loud as a collected RoleResolution failure
-  rather than misreading positions. horizon-rs stays the schema owner (it
-  is currently unconsumable as a cargo dependency: its `nota-next` git
-  dependency targets a branch where the package was renamed).
-- **The verify is wire-exercising (psyche-locked).** Where the repository's
-  flake exposes checks that build *and launch* the daemons — the class that
-  caught the build-vintage skew at runtime — those checks are the gate: the
-  builder enumerates `checks.<system>` at the pushed revision and builds
-  the wire-exercising class, selected by check-name words
-  (`daemon`/`socket`/`wire`; `src/build_verify.rs::WireCheckClassifier`).
-  Only where no such check exists does the verify fall back to the default
-  `nix build` of the flake. A green plain build alone is not sufficient
-  evidence. Everything is addressed as a remote flake reference
+  fields, node 17 fields) through the canonical codec primitives and selects
+  among the online nodes holding the role by declared capacity (absent
+  meaning one job), name order breaking ties; a schema-count mismatch fails
+  loud as a collected RoleResolution failure rather than misreading
+  positions. The service capacity is read generically from the queried
+  role's trailing payload — no service-kind name is hard-coded. In the
+  psyche's cluster `NixBuilder` currently resolves to prometheus, a fact that
+  lives in the datom, not here.
+- **The verify is wire-exercising (psyche-locked), and its words are
+  configured.** Where the repository's flake exposes checks that build *and
+  launch* the daemons — the class that caught the build-vintage skew at
+  runtime — those checks are the gate: the builder enumerates
+  `checks.<system>` at the pushed revision and builds the wire-exercising
+  class, selected by the check-name words the configured
+  `VerifyPolicy::WireExercising` carries (the criome instance uses
+  `daemon`/`socket`/`wire` and plurals; `src/build_verify.rs::WireCheckClassifier`).
+  Which words mark the class is a per-project naming convention, so they are
+  configuration, not a tool constant. Only where no such check exists does
+  the verify fall back to the default `nix build` of the flake; a project
+  with no such convention configures `VerifyPolicy::DefaultBuild` and skips
+  enumeration entirely. A green plain build alone is not sufficient evidence.
+  Everything is addressed as a remote flake reference
   (`github:<owner>/<component>/<revision>`) and executed on the resolved
   host over ssh, per the push-first builder doctrine: the builder only sees
   pushed refs. Wide `nix flake check` sweeps remain deliberately out (they
@@ -412,18 +543,19 @@ branches pushed (`PushedBranch`), per-level verify results
      d  apply typed bumps (format-preserving writes):
           CargoLock      — repin revision + package version at target;
                            transitive gap => cargo update --precise fallback
-          CargoManifest  — redirect branch main -> synchronizer   (cascade pins only)
+          CargoManifest  — redirect branch mainline -> staging   (cascade pins only)
           FlakeLock      — set rev; prefetch narHash (the only nix call
                            in the pin path); original always preserved
-          FlakeManifest  — rewrite rev-in-URL                     (URL-pinned inputs only)
+          FlakeManifest  — rewrite rev-in-URL                    (URL-pinned inputs only)
           unbumpable pin (deliberate rev/tag pin, same-name aliasing)
                          => fail loud, collected, pin left alone
-     e  commit the edited files on top of the remote main tip;
-        push the tool-owned synchronizer branch (force)
+     e  commit the edited files on top of the remote mainline tip
+        (author = configured CommitAuthor);
+        push the tool-owned staging branch (force)
      f  ledger.record(component, pushed tip)
-     g  verify at the pushed revision on the role-resolved builder host:
-        the repo's wire-exercising checks, or the default nix build where
-        it has none
+     g  verify at the pushed revision on the configured builder host:
+        the repo's wire-exercising checks (configured words), or the
+        default nix build where it has none / when DefaultBuild is set
      h  every step's failure is collected; the ascent continues
 6  render the SynchronizerReport as NOTA; exit nonzero when failures exist
 ```
@@ -440,8 +572,10 @@ src/
 ├── main.rs                fn main only: argv -> run -> NOTA report -> exit code
 ├── error.rs               typed crate Error (thiserror); run-fatal + infrastructure only
 ├── types.rs               domain newtypes (ComponentName, CommitIdentifier, BranchName,
-│                          BuilderRole, BuilderHost, NarHash, ...) + repository-identity grammar
-├── configuration.rs       NOTA config schema + load (canonical codec only)
+│                          BuilderRole, BuilderHost, AuthorName, AuthorEmail, ...) +
+│                          repository-identity grammar
+├── configuration.rs       NOTA config schema (Forge, BranchScheme, BuilderResolution,
+│                          ClusterSource, CommitAuthor) + load (canonical codec only)
 ├── toml_document.rs       PreservedTomlDocument: the format-preserving TOML write surface
 ├── cargo_manifest.rs      typed Cargo.toml model (serde read + preserved write) + cascade redirect
 ├── cargo_lock.rs          typed Cargo.lock model (serde read + preserved write) + git-pin repin
@@ -453,11 +587,15 @@ src/
 ├── version_resolver.rs    ResolvedTarget, BumpLedger, cascade rule, staleness
 ├── git_repository.rs      ComponentRepository boundary + gix object store: ls-remote, fetch,
 │                          object-level commit, synchronizer-branch push
-├── role_resolution.rs     ClusterRoleDirectory trait + cluster-proposal directory
-├── build_verify.rs        Verifier boundary + BuildVerifier: wire-exercising checks at
+├── role_resolution.rs     ClusterRoleDirectory trait + CriomOS cluster-proposal directory
+│                          (one optional builder-host strategy)
+├── build_verify.rs        Verifier boundary + BuildVerifier: VerifyPolicy-driven checks at
 │                          pushed rev on the resolved host; WireCheckClassifier
 ├── report.rs              NOTA report schema + rendering
-└── driver.rs              SynchronizerRun: boundary composition + the ascent
+└── driver.rs              SynchronizerRun: boundary composition + the ascent;
+                           BuilderHostResolver + ConfiguredBuilderHost strategy dispatch
+examples/
+└── validate.rs           decode-only config validator (no git/nix/network)
 tests/
 ├── fixtures/mod.rs        shared in-memory boundaries (repository, prefetch, verifier)
 ├── build_verify.rs        wire-check classification + installable addressing witnesses
@@ -483,13 +621,21 @@ type or a trait boundary; typed `Error` at the crate boundary.
 
 Test seeds — each of these should become a witness or review gate:
 
-- The tool never pushes to, commits to, or edits `main` — locally or
-  remotely — and only ever writes the `synchronizer` branch.
+- The tool carries zero project data: no hostname, repository name, path,
+  account, branch name, role name, commit identity, or check-name convention
+  appears in `src/`. Every such fact is a configuration field (§0a); a
+  non-criome config exercises the same generic paths
+  (`tests/configuration.rs`, `tests/driver.rs::generic`).
+- The tool never pushes to, commits to, or edits the mainline branch —
+  locally or remotely — and only ever writes the configured staging branch.
+  Neither branch name is a tool literal.
 - No working copy, index, or current branch of any configured checkout is
   read or modified; manifests are read at fetched revisions from the object
   store.
-- No hostname appears in source or configuration; builder selection passes
-  through `ClusterRoleDirectory`.
+- No hostname appears in source; builder selection passes through the
+  configured `BuilderResolution` strategy (`DirectHost`, or `ClusterRole`
+  through a `ClusterRoleDirectory` — the CriomOS resolver being one optional
+  plugin, never the only path).
 - All manifest and lock manipulation is typed: serde for TOML and JSON
   reading, the format-preserving TOML document for TOML writing, winnow for
   the git-source and input-URL grammars, the canonical NOTA codec (record
@@ -510,7 +656,7 @@ Test seeds — each of these should become a witness or review gate:
   and, on a detected transitive gap, the controlled
   `cargo update --precise` fallback in a scratch tree; build execution
   exists only inside `BuildVerifier`; git transport (ls-remote, fetch,
-  synchronizer-branch push) exists only inside `GitRepository`.
+  staging-branch push) exists only inside `GitRepository`.
 - Per-repository failures are collected, never fatal; only configuration
   load and topology discovery abort a run.
 - Topology edges derive only from manifests matched by repository identity
@@ -538,6 +684,13 @@ into the sections above:
    (§8).
 6. **Verify target** (locked): the wire-exercising check class, default
    build only where a repo has none (§8).
-7. **Third-party inputs stay out of scope**: only LiGoldragon component
+7. **Third-party inputs stay out of scope**: only configured component
    pins cascade; fenix/nixpkgs/crane convergence (primary-95fm) is separate
    work (§1).
+8. **Universality refactor** (§0a): every project-specific fact moved behind
+   typed config — branch scheme, builder-host strategy (`DirectHost` |
+   `ClusterRole`, the CriomOS resolver demoted to one optional plugin),
+   verify-policy words, and commit author. The tool source carries zero
+   criome data; the criome instance lives at `goldragon/synchronizer.nota`
+   (§3a). The cascade rule and the flake-input `original`-preservation rule
+   stay in code because they are deterministic, not project-varying.

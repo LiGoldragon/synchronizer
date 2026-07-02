@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use crate::component_manifests::ComponentManifests;
+use crate::configuration::BranchScheme;
 use crate::error::Error;
 use crate::report::PinValue;
 use crate::topology::{DependencyEdge, PinLayer};
@@ -35,11 +36,13 @@ impl ResolvedTarget {
     }
 
     /// The branch a consumer's manifest-layer declaration must follow to
-    /// reach this target from a fresh clone.
-    pub fn reachable_branch(&self) -> BranchName {
+    /// reach this target from a fresh clone, under the configured scheme: the
+    /// mainline branch for a main-tip target, the staging branch for a
+    /// cascade (synchronizer-tip) target.
+    pub fn reachable_branch(&self, scheme: &BranchScheme) -> BranchName {
         match self {
-            Self::RemoteMainTip(_) => BranchName::main(),
-            Self::SynchronizerTip(_) => BranchName::synchronizer(),
+            Self::RemoteMainTip(_) => scheme.mainline().clone(),
+            Self::SynchronizerTip(_) => scheme.staging().clone(),
         }
     }
 }
@@ -62,16 +65,18 @@ impl BumpLedger {
 /// Resolves dependency targets and detects stale pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionResolver {
-    /// Remote `main` tips, one per configured component, queried once at
+    /// Remote mainline tips, one per configured component, queried once at
     /// run start.
     main_tips: BTreeMap<ComponentName, CommitIdentifier>,
+    scheme: BranchScheme,
     ledger: BumpLedger,
 }
 
 impl VersionResolver {
-    pub fn new(main_tips: BTreeMap<ComponentName, CommitIdentifier>) -> Self {
+    pub fn new(main_tips: BTreeMap<ComponentName, CommitIdentifier>, scheme: BranchScheme) -> Self {
         Self {
             main_tips,
+            scheme,
             ledger: BumpLedger::default(),
         }
     }
@@ -100,7 +105,8 @@ impl VersionResolver {
     /// Every stale pin of `consumer`: lock-layer and URL-pin edges whose
     /// pinned revision differs from the resolved target revision, and
     /// Cargo-manifest edges whose declared branch cannot reach a cascade
-    /// target (`branch = "main"` while the target is a synchronizer tip).
+    /// target (a mainline-branch declaration while the target is a
+    /// staging-branch/synchronizer tip).
     pub fn stale_pins(
         &self,
         consumer: &ComponentManifests,
@@ -109,7 +115,7 @@ impl VersionResolver {
         let mut stale = Vec::new();
         for edge in edges {
             let target = self.resolve(edge.producer())?;
-            let pinned = consumer.pinned_value(edge)?;
+            let pinned = consumer.pinned_value(edge, self.scheme.mainline())?;
             let is_stale = match (edge.layer(), &pinned) {
                 (PinLayer::CargoLock | PinLayer::FlakeLock, PinValue::Revision(revision)) => {
                     revision != target.revision()
@@ -119,7 +125,7 @@ impl VersionResolver {
                 }
                 (PinLayer::CargoManifest, PinValue::Reference(branch)) => {
                     matches!(target, ResolvedTarget::SynchronizerTip(_))
-                        && branch != &target.reachable_branch()
+                        && branch != &target.reachable_branch(&self.scheme)
                 }
                 // A revision-pinned manifest declaration moves with the lock
                 // rule; a reference-shaped lock pin cannot occur.

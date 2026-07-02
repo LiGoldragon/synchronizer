@@ -23,8 +23,9 @@ use std::path::PathBuf;
 
 use gix::objs::tree::EntryKind;
 
+use crate::configuration::{BranchScheme, CommitAuthor};
 use crate::error::{Error, GitOperation};
-use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl};
+use crate::types::{CommitIdentifier, ComponentName, RepositoryUrl};
 
 /// The git surface the driver needs from one component. [`GitRepository`]
 /// is the production implementation; fixture implementations drive the
@@ -71,15 +72,21 @@ pub struct GitRepository {
     component: ComponentName,
     clone_path: PathBuf,
     remote_url: RepositoryUrl,
+    branch_scheme: BranchScheme,
+    commit_author: CommitAuthor,
     repository: gix::Repository,
 }
 
 impl GitRepository {
-    /// Open the configured clone at `clone_path`.
+    /// Open the configured clone at `clone_path`, bound to the configured
+    /// branch scheme (which mainline branch to query, which staging branch to
+    /// push) and commit author.
     pub fn open(
         component: ComponentName,
         clone_path: PathBuf,
         remote_url: RepositoryUrl,
+        branch_scheme: BranchScheme,
+        commit_author: CommitAuthor,
     ) -> Result<Self, Error> {
         let repository = gix::open(&clone_path).map_err(|error| Error::Git {
             component: component.clone(),
@@ -90,6 +97,8 @@ impl GitRepository {
             component,
             clone_path,
             remote_url,
+            branch_scheme,
+            commit_author,
             repository,
         })
     }
@@ -136,9 +145,10 @@ impl GitRepository {
 
 impl ComponentRepository for GitRepository {
     fn remote_main_tip(&self) -> Result<CommitIdentifier, Error> {
+        let mainline_ref = format!("refs/heads/{}", self.branch_scheme.mainline().as_str());
         let stdout = self.run_plumbing(
             GitOperation::RemoteQuery,
-            &["ls-remote", self.remote_url.as_str(), "refs/heads/main"],
+            &["ls-remote", self.remote_url.as_str(), mainline_ref.as_str()],
         )?;
         let tip = stdout
             .split_whitespace()
@@ -147,7 +157,7 @@ impl ComponentRepository for GitRepository {
             .ok_or_else(|| {
                 self.git_error(
                     GitOperation::RemoteQuery,
-                    format!("no refs/heads/main on {}", self.remote_url.as_str()),
+                    format!("no {} on {}", mainline_ref, self.remote_url.as_str()),
                 )
             })?;
         Ok(CommitIdentifier::new(tip))
@@ -251,8 +261,8 @@ impl ComponentRepository for GitRepository {
             .write()
             .map_err(|error| commit_error(error.to_string()))?;
         let signature = gix::actor::Signature {
-            name: "synchronizer".into(),
-            email: "synchronizer@criome.net".into(),
+            name: self.commit_author.name().as_str().into(),
+            email: self.commit_author.email().as_str().into(),
             time: gix::date::Time::now_local_or_utc(),
         };
         let commit = gix::objs::Commit {
@@ -272,8 +282,8 @@ impl ComponentRepository for GitRepository {
     }
 
     fn push_synchronizer_branch(&self, commit: &CommitIdentifier) -> Result<(), Error> {
-        let branch = BranchName::synchronizer();
-        let refspec = format!("+{}:refs/heads/{}", commit.as_str(), branch.as_str());
+        let staging = self.branch_scheme.staging();
+        let refspec = format!("+{}:refs/heads/{}", commit.as_str(), staging.as_str());
         self.run_plumbing(
             GitOperation::Push,
             &["push", self.remote_url.as_str(), refspec.as_str()],

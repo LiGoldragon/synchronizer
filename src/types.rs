@@ -52,23 +52,16 @@ impl CommitIdentifier {
 }
 
 /// A git branch name.
+///
+/// The tool carries no branch-name constant of its own: both the mainline
+/// branch (the default version target) and the staging branch (the tool-owned
+/// branch every bump is pushed to) are supplied by configuration through
+/// [`crate::configuration::BranchScheme`]. Nothing here assumes `main` or
+/// `synchronizer`.
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
 pub struct BranchName(String);
 
 impl BranchName {
-    /// The tool-owned staging branch every bump is pushed to.
-    ///
-    /// This is the only branch the tool ever writes. It is a constant of the
-    /// design, not a configuration parameter.
-    pub fn synchronizer() -> Self {
-        Self("synchronizer".to_string())
-    }
-
-    /// The branch whose remote tip is the default version target.
-    pub fn main() -> Self {
-        Self("main".to_string())
-    }
-
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
@@ -184,6 +177,38 @@ pub struct FlakeReference(String);
 impl FlakeReference {
     pub fn new(reference: impl Into<String>) -> Self {
         Self(reference.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The human name recorded as author and committer on every bump commit.
+/// Supplied by configuration ([`crate::configuration::CommitAuthor`]); the
+/// tool holds no author identity of its own.
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub struct AuthorName(String);
+
+impl AuthorName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The email recorded as author and committer on every bump commit. Supplied
+/// by configuration; the tool holds no email of its own (no `criome.net` or
+/// any other domain baked in).
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub struct AuthorEmail(String);
+
+impl AuthorEmail {
+    pub fn new(email: impl Into<String>) -> Self {
+        Self(email.into())
     }
 
     pub fn as_str(&self) -> &str {

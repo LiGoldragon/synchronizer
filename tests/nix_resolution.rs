@@ -28,7 +28,7 @@
 //! component repository is touched: the v1.0.0 tag of numtide/flake-utils
 //! plays the synchronizer tip (a revision that is not the main tip).
 
-use synchronizer::configuration::ClusterConfiguration;
+use synchronizer::configuration::ClusterSource;
 use synchronizer::flake_lock::{FlakeLock, InputName, PrefetchedSource};
 use synchronizer::role_resolution::{ClusterRoleDirectory, CriomosClusterDirectory};
 use synchronizer::types::{
@@ -50,9 +50,8 @@ impl BuilderProbe {
     fn from_cluster_proposal() -> Self {
         let path = std::env::var("SYNCHRONIZER_CLUSTER_PROPOSAL")
             .unwrap_or_else(|_| "/git/github.com/LiGoldragon/goldragon/datom.nota".to_string());
-        let directory = CriomosClusterDirectory::new(ClusterConfiguration::ClusterProposal(
-            AbsolutePath::new(path),
-        ));
+        let directory =
+            CriomosClusterDirectory::new(ClusterSource::ClusterProposal(AbsolutePath::new(path)));
         let host = directory
             .host_for(&BuilderRole::new("NixBuilder"))
             .expect("the cluster proposal resolves the builder role");

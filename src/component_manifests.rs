@@ -90,8 +90,14 @@ impl ComponentManifests {
 
     /// The pin value this component currently holds for `edge`, read from
     /// the layer the edge names: an exact revision for lock layers and
-    /// URL-pinned inputs, a branch reference for the Cargo manifest layer.
-    pub fn pinned_value(&self, edge: &DependencyEdge) -> Result<PinValue, Error> {
+    /// URL-pinned inputs, a branch reference for the Cargo manifest layer. A
+    /// declaration with no explicit branch/tag/rev follows the remote default
+    /// branch, reported as `mainline` (the configured mainline branch).
+    pub fn pinned_value(
+        &self,
+        edge: &DependencyEdge,
+        mainline: &BranchName,
+    ) -> Result<PinValue, Error> {
         let missing = |detail: String| Error::ManifestDecode {
             component: self.component.clone(),
             layer: edge.layer(),
@@ -113,7 +119,7 @@ impl ComponentManifests {
                     GitReference::Branch(branch) => PinValue::Reference(branch.clone()),
                     GitReference::Tag(tag) => PinValue::Reference(BranchName::new(tag.clone())),
                     GitReference::Revision(revision) => PinValue::Revision(revision.clone()),
-                    GitReference::DefaultBranch => PinValue::Reference(BranchName::main()),
+                    GitReference::DefaultBranch => PinValue::Reference(mainline.clone()),
                 })
             }
             (PinLayer::CargoLock, LocalPinName::CargoPackage(name)) => {

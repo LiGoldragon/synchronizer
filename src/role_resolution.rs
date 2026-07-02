@@ -1,8 +1,11 @@
-//! Role-indirect builder lookup.
+//! Role-indirect builder lookup — one builder-host strategy.
 //!
-//! The tool knows a CriomOS *role* name from configuration; it never holds
-//! a hostname. Resolution goes through this boundary so no hostname can
-//! appear in source or configuration (invariant, ARCHITECTURE.md §13).
+//! This is the cluster-role strategy: the configuration names a *role*, and
+//! this boundary resolves it to a host from cluster data, so no hostname
+//! appears in source. It is optional — a configuration may instead name the
+//! host directly (`BuilderResolution::DirectHost`), bypassing every cluster
+//! directory — and pluggable: other cluster surfaces join by a new
+//! `ClusterSource` variant. No hostname is ever hard-coded in source.
 //!
 //! The confirmed authoritative surface (OS-ops discovery, §14 q5) is the
 //! cluster proposal document: the horizon-rs `ClusterProposal` NOTA datom
@@ -19,32 +22,37 @@
 
 use nota::{Delimiter, NotaBlock, NotaDecode, NotaDecodeError, NotaSource};
 
-use crate::configuration::ClusterConfiguration;
+use crate::configuration::ClusterSource;
 use crate::error::Error;
 use crate::types::{BuilderHost, BuilderRole};
 
-/// The role-to-host boundary.
+/// The role-to-host boundary — one pluggable cluster-directory strategy.
+///
+/// [`CriomosClusterDirectory`] is the CriomOS cluster-datom strategy; it is
+/// never the only path (a configuration can name the host directly, bypassing
+/// every directory) and never hard-coded (the driver selects a directory only
+/// when the configuration chooses the cluster-role strategy).
 pub trait ClusterRoleDirectory {
     /// Resolve `role` to the host currently holding it in the cluster.
     fn host_for(&self, role: &BuilderRole) -> Result<BuilderHost, Error>;
 }
 
-/// The production directory: reads role assignments from the configured
-/// cluster proposal document.
+/// The CriomOS strategy: reads role assignments from the configured cluster
+/// proposal document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CriomosClusterDirectory {
-    cluster: ClusterConfiguration,
+    source: ClusterSource,
 }
 
 impl CriomosClusterDirectory {
-    pub fn new(cluster: ClusterConfiguration) -> Self {
-        Self { cluster }
+    pub fn new(source: ClusterSource) -> Self {
+        Self { source }
     }
 }
 
 impl ClusterRoleDirectory for CriomosClusterDirectory {
     fn host_for(&self, role: &BuilderRole) -> Result<BuilderHost, Error> {
-        let ClusterConfiguration::ClusterProposal(path) = &self.cluster;
+        let ClusterSource::ClusterProposal(path) = &self.source;
         let text = std::fs::read_to_string(path.as_path_buffer()).map_err(|error| {
             Error::RoleUnresolved {
                 role: role.clone(),
@@ -193,6 +201,12 @@ impl NodeRoleView {
 
 /// One service record, reduced to its kind atom and optional capacity
 /// payload (`(NixBuilder (Some 6))`).
+///
+/// The capacity is read generically from the service's optional trailing
+/// payload wherever it decodes as an `Option<u32>` — no service-kind name is
+/// hard-coded here. A service whose trailing payload is not a capacity (or
+/// that carries none) simply has no declared capacity; only the payload of
+/// the *queried* role's service is ever consulted for selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRoleView {
     kind: String,
@@ -210,10 +224,10 @@ impl NotaDecode for ServiceRoleView {
                 type_name: "NodeService kind",
             })?
             .to_string();
-        let capacity = match (kind.as_str(), children.get(1)) {
-            ("NixBuilder", Some(payload)) => Option::<u32>::from_nota_block(payload)?,
-            _ => None,
-        };
+        let capacity = children
+            .get(1)
+            .and_then(|payload| Option::<u32>::from_nota_block(payload).ok())
+            .flatten();
         Ok(Self { kind, capacity })
     }
 }

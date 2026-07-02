@@ -25,11 +25,11 @@
 
 use std::sync::OnceLock;
 
+use nota::{NotaDecode, NotaEncode};
+
 use crate::configuration::Forge;
-use crate::error::Error;
 use crate::report::VerificationGate;
-use crate::role_resolution::ClusterRoleDirectory;
-use crate::types::{BuilderHost, BuilderRole, CommitIdentifier, ComponentName, FlakeReference};
+use crate::types::{BuilderHost, CommitIdentifier, ComponentName, FlakeReference};
 
 /// The verify boundary the driver drives. [`BuildVerifier`] is the
 /// production implementation; fixtures stand in during ascent tests.
@@ -60,34 +60,72 @@ impl CheckName {
     }
 }
 
-/// Selects the wire-exercising check class from a flake's check names.
+/// How a run selects the verify gate — configuration, not a tool constant.
 ///
-/// The workspace convention this snapshot encodes: checks that launch
-/// daemons and speak the wire carry `daemon`, `socket`, or `wire` as a
-/// name word (`harness-daemon-answers-status-readiness`,
-/// `test-daemon-socket`,
-/// `router-generated-daemon-answers-working-and-meta-sockets`). The
-/// classifier matches those words — singular or plural — against the
-/// hyphen/underscore-split name. A repository joins the class by naming;
-/// nothing repository-specific lives here.
+/// The psyche-locked gate is wire-exercising: where a repository's flake
+/// exposes checks that build and launch the daemons, those checks are the
+/// verify; only where none exist does the verify fall back to the default
+/// build. *Which* check names mark that class is a per-project naming
+/// convention, so the words live in configuration. A consumer with no such
+/// convention names [`VerifyPolicy::DefaultBuild`] and every repository is
+/// verified by the default `nix build`.
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub enum VerifyPolicy {
+    /// Enumerate the flake's checks and build those whose name carries one of
+    /// these words; fall back to the default package build where none match.
+    WireExercising(Vec<WireCheckWord>),
+    /// Always the default `nix build` of the flake; never enumerate checks.
+    DefaultBuild,
+}
+
+impl VerifyPolicy {
+    /// The classifier this policy selects checks with, `None` for
+    /// [`Self::DefaultBuild`] (no enumeration happens).
+    pub fn classifier(&self) -> Option<WireCheckClassifier> {
+        match self {
+            Self::WireExercising(words) => Some(WireCheckClassifier::new(words.clone())),
+            Self::DefaultBuild => None,
+        }
+    }
+}
+
+/// One name word that marks a check as wire-exercising, e.g. `daemon` or
+/// `socket`. A project supplies its own set through [`VerifyPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+pub struct WireCheckWord(String);
+
+impl WireCheckWord {
+    pub fn new(word: impl Into<String>) -> Self {
+        Self(word.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Selects the wire-exercising check class from a flake's check names using
+/// the project's configured name words.
+///
+/// A check joins the class when the hyphen/underscore-split name carries a
+/// configured word (e.g. `harness-daemon-answers-status-readiness` matches
+/// `daemon`). Nothing repository-specific lives here — the words come from
+/// [`VerifyPolicy::WireExercising`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireCheckClassifier {
-    name_words: Vec<&'static str>,
+    name_words: Vec<WireCheckWord>,
 }
 
 impl WireCheckClassifier {
-    /// The workspace's wire-exercising name words.
-    pub fn workspace() -> Self {
-        Self {
-            name_words: vec!["daemon", "daemons", "socket", "sockets", "wire"],
-        }
+    pub fn new(name_words: Vec<WireCheckWord>) -> Self {
+        Self { name_words }
     }
 
     /// Whether one check name marks a wire-exercising check.
     pub fn is_wire_exercising(&self, name: &CheckName) -> bool {
         name.as_str()
             .split(['-', '_'])
-            .any(|word| self.name_words.contains(&word))
+            .any(|word| self.name_words.iter().any(|marker| marker.as_str() == word))
     }
 
     /// The verification target for a repository exposing `names`: its
@@ -148,35 +186,26 @@ impl VerificationTarget {
 
 /// Verifies pushed revisions on one resolved builder host over ssh (the
 /// push-first builder doctrine: the builder only sees pushed refs).
+///
+/// The host is resolved once per run by the driver's builder-host resolver
+/// (direct or cluster-role, per configuration) and bound here; this type
+/// carries no host or role knowledge of its own. The verify gate follows the
+/// configured [`VerifyPolicy`].
 pub struct BuildVerifier {
     host: BuilderHost,
-    classifier: WireCheckClassifier,
+    policy: VerifyPolicy,
     builder_system: OnceLock<String>,
 }
 
 impl BuildVerifier {
-    /// Resolve `role` through `directory` and bind the verifier to the
-    /// resulting host for the whole run, with the workspace check
-    /// classifier.
-    pub fn from_role(
-        directory: &dyn ClusterRoleDirectory,
-        role: &BuilderRole,
-    ) -> Result<Self, Error> {
-        Self::from_role_with_classifier(directory, role, WireCheckClassifier::workspace())
-    }
-
-    /// Resolve `role` and bind the verifier with an explicit classifier.
-    pub fn from_role_with_classifier(
-        directory: &dyn ClusterRoleDirectory,
-        role: &BuilderRole,
-        classifier: WireCheckClassifier,
-    ) -> Result<Self, Error> {
-        let host = directory.host_for(role)?;
-        Ok(Self {
+    /// Bind the verifier to a resolved `host` and the configured verify
+    /// `policy` for the whole run.
+    pub fn new(host: BuilderHost, policy: VerifyPolicy) -> Self {
+        Self {
             host,
-            classifier,
+            policy,
             builder_system: OnceLock::new(),
-        })
+        }
     }
 
     /// Run one command on the builder host, returning stdout or the failure
@@ -298,15 +327,19 @@ impl Verifier for BuildVerifier {
                 return VerificationOutcome::Failed(VerificationFailure { detail });
             }
         };
-        let names = match self.check_names(&reference, &system) {
-            Ok(names) => names,
-            Err(detail) => {
-                // An eval or transport failure, not an absent checks
-                // attribute: fail loud rather than downgrade the gate.
-                return VerificationOutcome::Failed(VerificationFailure { detail });
-            }
+        // DefaultBuild skips enumeration entirely; WireExercising enumerates
+        // and classifies with the configured words. An eval or transport
+        // failure while enumerating is a genuine failure, never a silent
+        // downgrade to the default build.
+        let target = match self.policy.classifier() {
+            None => VerificationTarget::DefaultPackage,
+            Some(classifier) => match self.check_names(&reference, &system) {
+                Ok(names) => classifier.select(&names),
+                Err(detail) => {
+                    return VerificationOutcome::Failed(VerificationFailure { detail });
+                }
+            },
         };
-        let target = self.classifier.select(&names);
         let installables = target.installables(&reference, &system);
         let quoted: Vec<String> = installables
             .iter()

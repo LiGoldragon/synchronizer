@@ -41,11 +41,11 @@ fn example_report() -> SynchronizerReport {
                             AppliedBump::new(
                                 frame.clone(),
                                 PinLayer::CargoManifest,
-                                PinValue::Reference(BranchName::main()),
-                                PinValue::Reference(BranchName::synchronizer()),
+                                PinValue::Reference(BranchName::new("main")),
+                                PinValue::Reference(BranchName::new("synchronizer")),
                             ),
                         ],
-                        PushedBranch::new(BranchName::synchronizer(), tip.clone()),
+                        PushedBranch::new(BranchName::new("synchronizer"), tip.clone()),
                     )),
                     Verification::VerifyFailed(host.clone()),
                 )],
@@ -62,7 +62,7 @@ fn example_report() -> SynchronizerReport {
                             PinValue::Revision(tip.clone()),
                         )],
                         PushedBranch::new(
-                            BranchName::synchronizer(),
+                            BranchName::new("synchronizer"),
                             CommitIdentifier::new("dddddddddddddddddddddddddddddddddddddddd"),
                         ),
                     )),

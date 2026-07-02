@@ -16,16 +16,20 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use fixtures::{
-    FixtureOpener, FixturePrefetch, FixtureRepository, FixtureRoleDirectory, FixtureVerifierSource,
-    UnreachableLockResolver, revision,
+    FixtureBuilderHost, FixtureOpener, FixturePrefetch, FixtureRepository, FixtureVerifierSource,
+    UnreachableLockResolver, revision, standard_config,
 };
+use synchronizer::build_verify::VerifyPolicy;
 use synchronizer::configuration::{
-    ClusterConfiguration, Component, ComponentCheckout, Forge, ForgeOwner, SynchronizerConfig,
+    BranchScheme, BuilderResolution, CommitAuthor, Component, ComponentCheckout, Forge, ForgeOwner,
+    SynchronizerConfig,
 };
 use synchronizer::driver::{RunBoundaries, SynchronizerRun};
 use synchronizer::report::{Action, FailureStage, PinValue, Verification, VerificationGate};
 use synchronizer::topology::PinLayer;
-use synchronizer::types::{AbsolutePath, BranchName, BuilderHost, BuilderRole, ComponentName};
+use synchronizer::types::{
+    AbsolutePath, AuthorEmail, AuthorName, BranchName, BuilderHost, ComponentName,
+};
 
 fn frame_files() -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -253,32 +257,26 @@ fn the_ascent_cascades_bumps_from_the_leaves() {
         ]),
     };
     let verified = Rc::new(RefCell::new(Vec::new()));
-    let config = SynchronizerConfig::new(
-        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
-        AbsolutePath::new("/git/github.com/LiGoldragon"),
-        vec![
-            Component::new(
-                ComponentName::new("signal-frame"),
-                ComponentCheckout::AtRoot,
-            ),
-            Component::new(
-                ComponentName::new("signal-router"),
-                ComponentCheckout::AtRoot,
-            ),
-            Component::new(
-                ComponentName::new("signal-harness"),
-                ComponentCheckout::AtRoot,
-            ),
-        ],
-        BuilderRole::new("NixBuilder"),
-        ClusterConfiguration::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
-    );
+    let config = standard_config(vec![
+        Component::new(
+            ComponentName::new("signal-frame"),
+            ComponentCheckout::AtRoot,
+        ),
+        Component::new(
+            ComponentName::new("signal-router"),
+            ComponentCheckout::AtRoot,
+        ),
+        Component::new(
+            ComponentName::new("signal-harness"),
+            ComponentCheckout::AtRoot,
+        ),
+    ]);
     let run = SynchronizerRun::with_boundaries(
         config,
         RunBoundaries {
             repository_opener: Box::new(opener),
             nar_hash_source: Box::new(FixturePrefetch),
-            role_directory: Box::new(FixtureRoleDirectory {
+            builder_host_resolver: Box::new(FixtureBuilderHost {
                 host: BuilderHost::new("prometheus"),
             }),
             verifier_source: Box::new(FixtureVerifierSource {
@@ -361,11 +359,11 @@ fn the_ascent_cascades_bumps_from_the_leaves() {
     assert_eq!(manifest_bump.dependency(), &router_name);
     assert_eq!(
         manifest_bump.previous(),
-        &PinValue::Reference(BranchName::main())
+        &PinValue::Reference(BranchName::new("main"))
     );
     assert_eq!(
         manifest_bump.next(),
-        &PinValue::Reference(BranchName::synchronizer())
+        &PinValue::Reference(BranchName::new("synchronizer"))
     );
     let router_lock_bump = harness_bump
         .applied()
@@ -458,28 +456,22 @@ fn a_fetch_failed_producer_collects_failures_and_the_ascent_continues() {
         repositories: BTreeMap::from([(ComponentName::new("signal-router"), Rc::clone(&router))]),
     };
     let verified = Rc::new(RefCell::new(Vec::new()));
-    let config = SynchronizerConfig::new(
-        Forge::GitHub(ForgeOwner::new("LiGoldragon")),
-        AbsolutePath::new("/git/github.com/LiGoldragon"),
-        vec![
-            Component::new(
-                ComponentName::new("signal-frame"),
-                ComponentCheckout::AtRoot,
-            ),
-            Component::new(
-                ComponentName::new("signal-router"),
-                ComponentCheckout::AtRoot,
-            ),
-        ],
-        BuilderRole::new("NixBuilder"),
-        ClusterConfiguration::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
-    );
+    let config = standard_config(vec![
+        Component::new(
+            ComponentName::new("signal-frame"),
+            ComponentCheckout::AtRoot,
+        ),
+        Component::new(
+            ComponentName::new("signal-router"),
+            ComponentCheckout::AtRoot,
+        ),
+    ]);
     let run = SynchronizerRun::with_boundaries(
         config,
         RunBoundaries {
             repository_opener: Box::new(opener),
             nar_hash_source: Box::new(FixturePrefetch),
-            role_directory: Box::new(FixtureRoleDirectory {
+            builder_host_resolver: Box::new(FixtureBuilderHost {
                 host: BuilderHost::new("prometheus"),
             }),
             verifier_source: Box::new(FixtureVerifierSource {
@@ -520,4 +512,262 @@ fn a_fetch_failed_producer_collects_failures_and_the_ascent_continues() {
         router.pushed.borrow().is_empty(),
         "nothing is pushed for a consumer whose resolution failed"
     );
+}
+
+/// Universality witness: a project with no criome fact whatsoever cascades
+/// end to end through the generic paths. A different forge account
+/// (`octocat`), a `trunk` mainline, a `bump-train` staging branch, a directly
+/// named builder host, and the default-build verify policy — nothing assumes
+/// `main` or `synchronizer`. The cascade redirects gamma's manifest to the
+/// configured `bump-train` branch, proving no branch name is hard-coded in
+/// the ascent.
+mod generic {
+    use super::*;
+
+    fn generic_config() -> SynchronizerConfig {
+        SynchronizerConfig::new(
+            Forge::GitHub(ForgeOwner::new("octocat")),
+            AbsolutePath::new("/home/dev/src"),
+            vec![
+                Component::new(ComponentName::new("alpha"), ComponentCheckout::AtRoot),
+                Component::new(ComponentName::new("beta"), ComponentCheckout::AtRoot),
+                Component::new(ComponentName::new("gamma"), ComponentCheckout::AtRoot),
+            ],
+            BranchScheme::new(BranchName::new("trunk"), BranchName::new("bump-train")),
+            BuilderResolution::DirectHost(BuilderHost::new("buildbox.local")),
+            VerifyPolicy::DefaultBuild,
+            CommitAuthor::new(
+                AuthorName::new("ci-bot"),
+                AuthorEmail::new("ci@octocat.example"),
+            ),
+        )
+    }
+
+    fn alpha_files() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "Cargo.toml".to_string(),
+                concat!(
+                    "[package]\n",
+                    "name = \"alpha\"\n",
+                    "version = \"0.3.0\"\n",
+                    "\n",
+                    "[dependencies]\n",
+                )
+                .to_string(),
+            ),
+            (
+                "Cargo.lock".to_string(),
+                concat!(
+                    "version = 4\n",
+                    "\n",
+                    "[[package]]\n",
+                    "name = \"alpha\"\n",
+                    "version = \"0.3.0\"\n",
+                )
+                .to_string(),
+            ),
+        ])
+    }
+
+    fn beta_files() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "Cargo.toml".to_string(),
+                concat!(
+                    "[package]\n",
+                    "name = \"beta\"\n",
+                    "version = \"0.1.0\"\n",
+                    "\n",
+                    "[dependencies]\n",
+                    "alpha = { git = \"https://github.com/octocat/alpha.git\", branch = \"trunk\" }\n",
+                )
+                .to_string(),
+            ),
+            (
+                "Cargo.lock".to_string(),
+                format!(
+                    concat!(
+                        "version = 4\n",
+                        "\n",
+                        "[[package]]\n",
+                        "name = \"alpha\"\n",
+                        "version = \"0.2.0\"\n",
+                        "source = \"git+https://github.com/octocat/alpha.git?branch=trunk#{alpha_old}\"\n",
+                        "\n",
+                        "[[package]]\n",
+                        "name = \"beta\"\n",
+                        "version = \"0.1.0\"\n",
+                        "dependencies = [\n \"alpha\",\n]\n",
+                    ),
+                    alpha_old = revision("alpha-old").as_str()
+                ),
+            ),
+        ])
+    }
+
+    fn gamma_files() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "Cargo.toml".to_string(),
+                concat!(
+                    "[package]\n",
+                    "name = \"gamma\"\n",
+                    "version = \"0.1.0\"\n",
+                    "\n",
+                    "[dependencies]\n",
+                    "beta = { git = \"https://github.com/octocat/beta.git\", branch = \"trunk\" }\n",
+                )
+                .to_string(),
+            ),
+            (
+                "Cargo.lock".to_string(),
+                format!(
+                    concat!(
+                        "version = 4\n",
+                        "\n",
+                        "[[package]]\n",
+                        "name = \"alpha\"\n",
+                        "version = \"0.2.0\"\n",
+                        "source = \"git+https://github.com/octocat/alpha.git?branch=trunk#{alpha_old}\"\n",
+                        "\n",
+                        "[[package]]\n",
+                        "name = \"beta\"\n",
+                        "version = \"0.1.0\"\n",
+                        "source = \"git+https://github.com/octocat/beta.git?branch=trunk#{beta_old}\"\n",
+                        "dependencies = [\n \"alpha\",\n]\n",
+                        "\n",
+                        "[[package]]\n",
+                        "name = \"gamma\"\n",
+                        "version = \"0.1.0\"\n",
+                        "dependencies = [\n \"beta\",\n]\n",
+                    ),
+                    alpha_old = revision("alpha-old").as_str(),
+                    beta_old = revision("beta-old").as_str()
+                ),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_non_criome_project_cascades_through_generic_config() {
+        let alpha = Rc::new(FixtureRepository::new(
+            "alpha",
+            revision("alpha-new"),
+            alpha_files(),
+        ));
+        let beta = Rc::new(FixtureRepository::new(
+            "beta",
+            revision("beta-trunk"),
+            beta_files(),
+        ));
+        let gamma = Rc::new(FixtureRepository::new(
+            "gamma",
+            revision("gamma-trunk"),
+            gamma_files(),
+        ));
+        let opener = FixtureOpener {
+            repositories: BTreeMap::from([
+                (ComponentName::new("alpha"), Rc::clone(&alpha)),
+                (ComponentName::new("beta"), Rc::clone(&beta)),
+                (ComponentName::new("gamma"), Rc::clone(&gamma)),
+            ]),
+        };
+        let verified = Rc::new(RefCell::new(Vec::new()));
+        let run = SynchronizerRun::with_boundaries(
+            generic_config(),
+            RunBoundaries {
+                repository_opener: Box::new(opener),
+                nar_hash_source: Box::new(FixturePrefetch),
+                builder_host_resolver: Box::new(FixtureBuilderHost {
+                    host: BuilderHost::new("buildbox.local"),
+                }),
+                verifier_source: Box::new(FixtureVerifierSource {
+                    verified: Rc::clone(&verified),
+                }),
+                lock_resolver: Box::new(UnreachableLockResolver {
+                    witness: "generic ascent witness",
+                }),
+            },
+        );
+        let report = run.execute().expect("the generic ascent completes");
+        assert!(
+            !report.has_failures(),
+            "collected failures: {:?}",
+            report.failures()
+        );
+
+        // beta bumps its alpha lock toward alpha's trunk tip (a main-tip
+        // target: no manifest redirect, the trunk declaration already
+        // reaches it).
+        let levels = report.levels();
+        let beta_outcome = &levels[1].repositories()[0];
+        let Action::Bumped(beta_bump) = beta_outcome.action() else {
+            panic!("beta must bump: {beta_outcome:?}");
+        };
+        let beta_layers: Vec<PinLayer> = beta_bump
+            .applied()
+            .iter()
+            .map(|bump| bump.layer())
+            .collect();
+        assert_eq!(
+            beta_layers,
+            vec![PinLayer::CargoLock],
+            "a trunk-declared main-tip target moves the lock only"
+        );
+        let beta_tip = beta_bump.pushed().tip().clone();
+        assert_eq!(
+            beta_bump.pushed().branch(),
+            &BranchName::new("bump-train"),
+            "the tool pushes the configured staging branch, not a hard-coded one"
+        );
+
+        // gamma pins beta's pushed staging tip and redirects its manifest to
+        // the configured staging branch — never `synchronizer`.
+        let gamma_outcome = &levels[2].repositories()[0];
+        let Action::Bumped(gamma_bump) = gamma_outcome.action() else {
+            panic!("gamma must bump: {gamma_outcome:?}");
+        };
+        let manifest_bump = gamma_bump
+            .applied()
+            .iter()
+            .find(|bump| bump.layer() == PinLayer::CargoManifest)
+            .expect("the cascade redirects gamma's manifest declaration");
+        assert_eq!(manifest_bump.dependency(), &ComponentName::new("beta"));
+        assert_eq!(
+            manifest_bump.previous(),
+            &PinValue::Reference(BranchName::new("trunk")),
+            "the previous declaration is the configured mainline, not `main`"
+        );
+        assert_eq!(
+            manifest_bump.next(),
+            &PinValue::Reference(BranchName::new("bump-train")),
+            "the redirect targets the configured staging branch, not `synchronizer`"
+        );
+        let beta_lock_bump = gamma_bump
+            .applied()
+            .iter()
+            .find(|bump| {
+                bump.layer() == PinLayer::CargoLock
+                    && bump.dependency() == &ComponentName::new("beta")
+            })
+            .expect("gamma's beta lock pin moves");
+        assert_eq!(
+            beta_lock_bump.next(),
+            &PinValue::Revision(beta_tip.clone()),
+            "gamma pins the staging tip beta pushed this run"
+        );
+
+        // The committed gamma manifest carries the configured staging branch.
+        let gamma_tip = gamma_bump.pushed().tip().clone();
+        let gamma_manifest = gamma
+            .file_text(&gamma_tip, "Cargo.toml")
+            .expect("the bump commit carries the manifest");
+        assert!(gamma_manifest.contains("branch = \"bump-train\""));
+        assert!(!gamma_manifest.contains("synchronizer"));
+
+        assert!(alpha.pushed.borrow().is_empty());
+        assert_eq!(beta.pushed.borrow().len(), 1);
+        assert_eq!(gamma.pushed.borrow().len(), 1);
+    }
 }

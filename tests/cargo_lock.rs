@@ -42,7 +42,10 @@ fn git_pins_parse_through_the_winnow_grammar() {
         pin.url().as_str(),
         "https://github.com/LiGoldragon/signal-frame.git"
     );
-    assert_eq!(pin.reference(), &GitReference::Branch(BranchName::main()));
+    assert_eq!(
+        pin.reference(),
+        &GitReference::Branch(BranchName::new("main"))
+    );
     assert_eq!(
         pin.revision().as_str(),
         "1111111111111111111111111111111111111111"
@@ -57,7 +60,7 @@ fn repin_changes_exactly_the_pinned_entry_and_preserves_the_rest() {
     let previous = lock
         .repin_git_package(
             &DependencyName::new("signal-frame"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
             next,
             Some(PackageVersion::new("0.3.0")),
         )
@@ -121,7 +124,7 @@ fn same_name_lock_entries_fail_loud_instead_of_aliasing() {
     let error = lock
         .repin_git_package(
             &DependencyName::new("signal-frame"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
             CommitIdentifier::new("2222222222222222222222222222222222222222"),
             None,
         )
@@ -152,7 +155,7 @@ fn deliberately_rev_pinned_lock_entries_fail_loud() {
     let error = lock
         .repin_git_package(
             &DependencyName::new("sema-engine"),
-            GitReference::Branch(BranchName::synchronizer()),
+            GitReference::Branch(BranchName::new("synchronizer")),
             CommitIdentifier::new("2222222222222222222222222222222222222222"),
             None,
         )

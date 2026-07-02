@@ -128,8 +128,8 @@ impl CargoManifest {
     /// format-preserving document, returning the previous reference.
     ///
     /// This is the cascade edit: a consumer pinning a bumped dependency is
-    /// redirected from `branch = "main"` to `branch = "synchronizer"` so
-    /// Cargo can reach the locked revision on a fresh clone. The document
+    /// redirected from the mainline branch to the configured staging branch
+    /// so Cargo can reach the locked revision on a fresh clone. The document
     /// is addressed by the entry's table *key*, which under a `package =`
     /// rename differs from the resolved package name. Comments and layout
     /// survive: only the one value changes.

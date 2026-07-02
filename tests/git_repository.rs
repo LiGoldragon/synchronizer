@@ -6,10 +6,13 @@
 
 use gix::objs::tree::EntryKind;
 
+use synchronizer::configuration::{BranchScheme, CommitAuthor};
 use synchronizer::git_repository::{
     CommitMessage, ComponentRepository, FileEdit, GitRepository, RepositoryFilePath,
 };
-use synchronizer::types::{CommitIdentifier, ComponentName, RepositoryUrl};
+use synchronizer::types::{
+    AuthorEmail, AuthorName, BranchName, CommitIdentifier, ComponentName, RepositoryUrl,
+};
 
 /// A bare fixture repository with one root commit carrying two files.
 fn fixture_repository(directory: &std::path::Path) -> CommitIdentifier {
@@ -57,6 +60,11 @@ fn commits_are_built_at_the_object_level_without_touching_any_ref() {
         ComponentName::new("fixture"),
         scratch.path().to_path_buf(),
         RepositoryUrl::new("https://github.com/LiGoldragon/fixture.git"),
+        BranchScheme::new(BranchName::new("main"), BranchName::new("synchronizer")),
+        CommitAuthor::new(
+            AuthorName::new("release-bot"),
+            AuthorEmail::new("release@example.org"),
+        ),
     )
     .expect("the boundary opens the clone");
 
@@ -97,8 +105,18 @@ fn commits_are_built_at_the_object_level_without_touching_any_ref() {
         .expect("untouched files carry over from the base tree");
     assert_eq!(inherited, "fixture readme\n");
 
-    // No ref anywhere moved: the commit exists only in the object store.
+    // The commit carries the configured author, not any tool-baked identity.
     let reopened = gix::open(scratch.path()).expect("fixture reopens");
+    let committed = reopened
+        .find_object(gix::ObjectId::from_hex(tip.as_str().as_bytes()).expect("tip is an object id"))
+        .expect("the bump commit is in the object store")
+        .try_into_commit()
+        .expect("the object is a commit");
+    let author = committed.author().expect("the commit has an author");
+    assert_eq!(author.name, "release-bot");
+    assert_eq!(author.email, "release@example.org");
+
+    // No ref anywhere moved: the commit exists only in the object store.
     let references: Vec<_> = reopened
         .references()
         .expect("reference platform opens")

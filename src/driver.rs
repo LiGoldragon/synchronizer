@@ -140,6 +140,29 @@ impl VerifierSource for BuildVerifierSource {
     }
 }
 
+/// Which branch a run reads each component's base manifests from, and how the
+/// cascade ledger starts.
+///
+/// A typed run mode, not a flag: the two variants name the two coordinated
+/// flows. Neither carries a branch name — the staging branch is always the
+/// configured `BranchScheme.staging`, and the pre-staged producer set is
+/// discovered from the forge (a component whose staging branch exists), never
+/// named in code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseSelection {
+    /// Ordinary version propagation: read every component at its mainline tip;
+    /// the cascade ledger starts empty. A producer bumped during the ascent
+    /// enters the ledger and its consumers cascade to the pushed staging tip.
+    Mainline,
+    /// Coordinated cross-branch verify over an already-staged set: read a
+    /// component at its staging-branch tip where that branch exists (its
+    /// mainline tip otherwise), and seed the cascade ledger with those existing
+    /// staging tips — so a consumer resolves an already-staged producer to its
+    /// staging tip rather than its mainline, and the whole staged set verifies
+    /// together. The same cascade rule, pin models, and verify then apply.
+    StagedCascade,
+}
+
 /// The injected boundaries of one run.
 pub struct RunBoundaries {
     pub repository_opener: Box<dyn RepositoryOpener>,
@@ -153,6 +176,7 @@ pub struct RunBoundaries {
 pub struct SynchronizerRun {
     config: SynchronizerConfig,
     boundaries: RunBoundaries,
+    base_selection: BaseSelection,
 }
 
 /// One component loaded at run start: its git surface, remote `main` tip,
@@ -198,9 +222,21 @@ impl SynchronizerRun {
     }
 
     /// Compose a run with explicit boundaries (fixture surface for ascent
-    /// witnesses).
+    /// witnesses). Defaults to [`BaseSelection::Mainline`]; a coordinated
+    /// cross-branch run selects [`Self::with_base_selection`].
     pub fn with_boundaries(config: SynchronizerConfig, boundaries: RunBoundaries) -> Self {
-        Self { config, boundaries }
+        Self {
+            config,
+            boundaries,
+            base_selection: BaseSelection::Mainline,
+        }
+    }
+
+    /// Select which branch each component's base manifests are read from and
+    /// how the cascade ledger starts (see [`BaseSelection`]).
+    pub fn with_base_selection(mut self, base_selection: BaseSelection) -> Self {
+        self.base_selection = base_selection;
+        self
     }
 
     /// The component-name field run-scoped failures (builder-host
@@ -222,14 +258,22 @@ impl SynchronizerRun {
         let mut failures: Vec<Failure> = Vec::new();
         let mut unprocessable: Vec<ComponentName> = Vec::new();
         let mut loaded: BTreeMap<ComponentName, LoadedComponent> = BTreeMap::new();
+        // The producers already staged this run (StagedCascade): a component
+        // read at its staging tip. Their tips pre-seed the cascade ledger so a
+        // consumer resolves them to the staging branch, not the mainline.
+        let mut prestaged: BTreeMap<ComponentName, CommitIdentifier> = BTreeMap::new();
 
-        // 1–3: open each clone, query the remote main tip, fetch it, and
-        // read the manifests at it. A component that fails here is
-        // reported and excluded from the ascent; the run keeps going.
+        // 1–3: open each clone, query the base tip (mainline, or the staging
+        // tip where it exists under StagedCascade), fetch it, and read the
+        // manifests at it. A component that fails here is reported and excluded
+        // from the ascent; the run keeps going.
         for component in self.config.components() {
             let name = component.name().clone();
             match self.load_component(&name) {
-                Ok(loaded_component) => {
+                Ok((loaded_component, staging_tip)) => {
+                    if let Some(tip) = staging_tip {
+                        prestaged.insert(name.clone(), tip);
+                    }
                     loaded.insert(name, loaded_component);
                 }
                 Err(error) => {
@@ -257,6 +301,14 @@ impl SynchronizerRun {
             .map(|(name, component)| (name.clone(), component.manifests.base_revision().clone()))
             .collect();
         let mut resolver = VersionResolver::new(main_tips, self.config.branch_scheme().clone());
+        // Pre-seed the cascade ledger with the already-staged producers, so a
+        // consumer resolves each of them to its staging tip (the staging
+        // branch) rather than its mainline. The ledger does not care whether a
+        // tip was pushed by this run's ascent or by a prior coordinated step —
+        // only that the producer's aligned truth this run is its staging tip.
+        for (name, tip) in &prestaged {
+            resolver.record_bump(name.clone(), tip.clone());
+        }
 
         // Builder-host resolution happens once; its failure never stops bumps
         // and pushes — every verification then reports NotAttempted (§9).
@@ -329,20 +381,40 @@ impl SynchronizerRun {
         ))
     }
 
-    fn load_component(&self, name: &ComponentName) -> Result<LoadedComponent, Error> {
+    /// Open a component and read its base manifests. Returns the loaded
+    /// component and, under [`BaseSelection::StagedCascade`], the staging tip
+    /// it was read at (`None` when it was read at its mainline tip — either the
+    /// normal mode, or a component with no staging branch).
+    fn load_component(
+        &self,
+        name: &ComponentName,
+    ) -> Result<(LoadedComponent, Option<CommitIdentifier>), Error> {
         let clone_path = self.config.checkout_path(name)?;
         let remote_url = self.config.repository_url(name)?;
         let repository = self
             .boundaries
             .repository_opener
             .open(name, clone_path, remote_url)?;
-        let tip = repository.remote_main_tip()?;
+        // In StagedCascade a component read at its staging tip is a pre-staged
+        // producer; one with no staging branch falls back to its mainline tip
+        // and stays out of the ledger (it resolves to its mainline).
+        let staging_tip = match self.base_selection {
+            BaseSelection::Mainline => None,
+            BaseSelection::StagedCascade => repository.remote_staging_tip()?,
+        };
+        let tip = match &staging_tip {
+            Some(tip) => tip.clone(),
+            None => repository.remote_main_tip()?,
+        };
         repository.fetch(&tip)?;
         let manifests = ComponentManifests::load_at(repository.as_ref(), name, tip)?;
-        Ok(LoadedComponent {
-            repository,
-            manifests,
-        })
+        Ok((
+            LoadedComponent {
+                repository,
+                manifests,
+            },
+            staging_tip,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

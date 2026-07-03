@@ -34,6 +34,13 @@ pub trait ComponentRepository {
     /// The latest pushed `main` tip, queried read-only from the remote.
     fn remote_main_tip(&self) -> Result<CommitIdentifier, Error>;
 
+    /// The latest pushed staging-branch tip, queried read-only from the
+    /// remote, or `None` when the staging branch does not exist. A coordinated
+    /// cross-branch run reads an already-staged component at this tip and
+    /// resolves its consumers to it (the staging branch), rather than the
+    /// mainline. Absence means the component was not pre-staged this run.
+    fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error>;
+
     /// Fetch `revision` into the local object store so files at that
     /// revision can be read.
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error>;
@@ -161,6 +168,21 @@ impl ComponentRepository for GitRepository {
                 )
             })?;
         Ok(CommitIdentifier::new(tip))
+    }
+
+    fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error> {
+        let staging_ref = format!("refs/heads/{}", self.branch_scheme.staging().as_str());
+        let stdout = self.run_plumbing(
+            GitOperation::RemoteQuery,
+            &["ls-remote", self.remote_url.as_str(), staging_ref.as_str()],
+        )?;
+        // An absent staging branch answers with empty output — data, not a
+        // failure: the component simply was not pre-staged this run.
+        Ok(stdout
+            .split_whitespace()
+            .next()
+            .filter(|tip| CommitIdentifier::is_full_object_id(tip))
+            .map(CommitIdentifier::new))
     }
 
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error> {

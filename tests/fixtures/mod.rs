@@ -36,11 +36,25 @@ use synchronizer::types::{
 /// The generic (non-criome) paths are witnessed separately in
 /// `tests/configuration.rs` and `tests/driver.rs`.
 pub fn standard_config(components: Vec<Component>) -> SynchronizerConfig {
+    standard_config_with_scheme(
+        components,
+        BranchScheme::new(BranchName::new("main"), BranchName::new("synchronizer")),
+    )
+}
+
+/// As [`standard_config`], with the branch scheme supplied by the caller. Both
+/// branch names are configuration, never a fixture constant, so a coordinated
+/// cross-branch witness drives its own staging branch (e.g. `drop-next`)
+/// through the same generic paths.
+pub fn standard_config_with_scheme(
+    components: Vec<Component>,
+    branch_scheme: BranchScheme,
+) -> SynchronizerConfig {
     SynchronizerConfig::new(
         Forge::GitHub(ForgeOwner::new("LiGoldragon")),
         AbsolutePath::new("/git/github.com/LiGoldragon"),
         components,
-        BranchScheme::new(BranchName::new("main"), BranchName::new("synchronizer")),
+        branch_scheme,
         BuilderResolution::ClusterRole(
             BuilderRole::new("NixBuilder"),
             ClusterSource::ClusterProposal(AbsolutePath::new("/cluster/datom.nota")),
@@ -75,6 +89,7 @@ pub fn revision(tag: &str) -> CommitIdentifier {
 pub struct FixtureRepository {
     pub component: ComponentName,
     pub main_tip: CommitIdentifier,
+    pub staging_tip: Option<CommitIdentifier>,
     pub trees: RefCell<BTreeMap<String, BTreeMap<String, String>>>,
     pub pushed: RefCell<Vec<CommitIdentifier>>,
     pub commit_counter: RefCell<u32>,
@@ -91,10 +106,26 @@ impl FixtureRepository {
         Self {
             component: ComponentName::new(component),
             main_tip,
+            staging_tip: None,
             trees: RefCell::new(trees),
             pushed: RefCell::new(Vec::new()),
             commit_counter: RefCell::new(0),
         }
+    }
+
+    /// Publish an already-staged tip for the cross-branch witness: the staging
+    /// branch exists and carries `files`, so a StagedCascade run reads this
+    /// component at `staging_tip` and seeds the cascade ledger with it.
+    pub fn with_staging(
+        mut self,
+        staging_tip: CommitIdentifier,
+        files: BTreeMap<String, String>,
+    ) -> Self {
+        self.trees
+            .borrow_mut()
+            .insert(staging_tip.as_str().to_string(), files);
+        self.staging_tip = Some(staging_tip);
+        self
     }
 
     pub fn file_text(&self, revision: &CommitIdentifier, path: &str) -> Option<String> {
@@ -109,6 +140,10 @@ impl FixtureRepository {
 impl ComponentRepository for FixtureRepository {
     fn remote_main_tip(&self) -> Result<CommitIdentifier, Error> {
         Ok(self.main_tip.clone())
+    }
+
+    fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error> {
+        Ok(self.staging_tip.clone())
     }
 
     fn fetch(&self, _revision: &CommitIdentifier) -> Result<(), Error> {
@@ -180,6 +215,10 @@ pub struct SharedRepository(pub Rc<FixtureRepository>);
 impl ComponentRepository for SharedRepository {
     fn remote_main_tip(&self) -> Result<CommitIdentifier, Error> {
         self.0.remote_main_tip()
+    }
+
+    fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error> {
+        self.0.remote_staging_tip()
     }
 
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error> {

@@ -130,6 +130,76 @@ fn edges_come_only_from_manifests_matched_by_repository_identity() {
     assert!(edges.iter().any(|edge| edge.layer() == PinLayer::CargoLock));
 }
 
+/// A producer declared under several same-name manifest entries (the same
+/// crate in `[dependencies]` and `[dev-dependencies]`) collapses to a single
+/// manifest edge — the invariant "one edge per (consumer, producer, layer)".
+/// The lock records the crate once, so the lock edge is single too.
+#[test]
+fn same_name_manifest_entries_collapse_to_one_edge() {
+    let files = BTreeMap::from([
+        (
+            "Cargo.toml".to_string(),
+            concat!(
+                "[package]\n",
+                "name = \"router\"\n",
+                "version = \"0.1.0\"\n",
+                "\n",
+                "[dependencies]\n",
+                "signal-criome = { git = \"https://github.com/LiGoldragon/signal-criome.git\", branch = \"main\" }\n",
+                "\n",
+                "[dev-dependencies]\n",
+                "signal-criome = { git = \"https://github.com/LiGoldragon/signal-criome.git\", branch = \"main\" }\n",
+            )
+            .to_string(),
+        ),
+        (
+            "Cargo.lock".to_string(),
+            format!(
+                concat!(
+                    "version = 4\n",
+                    "\n",
+                    "[[package]]\n",
+                    "name = \"router\"\n",
+                    "version = \"0.1.0\"\n",
+                    "\n",
+                    "[[package]]\n",
+                    "name = \"signal-criome\"\n",
+                    "version = \"0.1.0\"\n",
+                    "source = \"git+https://github.com/LiGoldragon/signal-criome.git?branch=main#{rev}\"\n",
+                ),
+                rev = revision("signal-criome-old").as_str()
+            ),
+        ),
+    ]);
+    let router = manifests_for("router", files);
+    let signal_criome = cargo_component("signal-criome", &[]);
+    let config = config_for(&["router", "signal-criome"]);
+    let graph =
+        DependencyGraph::discover(&config, &[router, signal_criome]).expect("topology discovers");
+    let edges = graph.dependencies_of(&ComponentName::new("router"));
+    assert_eq!(
+        edges.len(),
+        2,
+        "two same-name manifest entries collapse to one manifest edge, plus the single lock edge"
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge.layer() == PinLayer::CargoManifest)
+            .count(),
+        1,
+        "exactly one manifest edge for the doubly-declared producer"
+    );
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|edge| edge.layer() == PinLayer::CargoLock)
+            .count(),
+        1,
+        "exactly one lock edge",
+    );
+}
+
 #[test]
 fn ascent_levels_put_leaves_first_and_reject_cycles() {
     let frame = cargo_component("signal-frame", &[]);

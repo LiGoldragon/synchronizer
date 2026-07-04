@@ -136,28 +136,44 @@ fn deliberate_revision_pins_fail_loud_instead_of_emitting_invalid_manifests() {
     );
 }
 
-/// A package pinned by several same-name entries fails loud: addressing
-/// by name would silently alias the first match.
+/// A producer declared under several same-name entries — here `signal-frame`
+/// in `[dependencies]` and again under a `package =` rename in
+/// `[dev-dependencies]` — has every entry redirected coherently. One edge,
+/// all its textual entries follow the cascade; none is left behind on the
+/// stale branch, and each is addressed by its own table key.
 #[test]
-fn a_package_aliased_by_several_entries_fails_loud() {
+fn every_same_name_entry_redirects_coherently() {
     let component = ComponentName::new("consumer");
     let mut manifest = CargoManifest::from_toml_text(RENAMED_AND_PINNED_MANIFEST, &component)
         .expect("manifest decodes");
-    let error = manifest
+    let previous = manifest
         .redirect_git_dependency(
             &DependencyName::new("signal-frame"),
             GitReference::Branch(BranchName::new("synchronizer")),
         )
-        .expect_err("an aliased package must not be redirected by first match");
+        .expect("every same-name entry redirects, not the first match alone");
+    assert_eq!(previous, GitReference::Branch(BranchName::new("main")));
+    let rendered = manifest.to_toml_text();
+    let expected = RENAMED_AND_PINNED_MANIFEST
+        .replace(
+            "signal-frame = { git = \"https://github.com/LiGoldragon/signal-frame.git\", branch = \"main\" }",
+            "signal-frame = { git = \"https://github.com/LiGoldragon/signal-frame.git\", branch = \"synchronizer\" }",
+        )
+        .replace(
+            "signal-frame-dev = { package = \"signal-frame\", git = \"https://github.com/LiGoldragon/signal-frame.git\", branch = \"main\" }",
+            "signal-frame-dev = { package = \"signal-frame\", git = \"https://github.com/LiGoldragon/signal-frame.git\", branch = \"synchronizer\" }",
+        );
+    assert_eq!(
+        rendered.as_str(),
+        expected,
+        "both same-name entries follow the cascade; the rev-pinned sema-engine and every comment survive untouched"
+    );
+    // The deliberately rev-pinned entry in the same manifest is untouched.
     assert!(
-        matches!(
-            &error,
-            Error::UnbumpablePin {
-                reason: UnbumpablePinReason::MultipleEntries,
-                ..
-            }
+        rendered.as_str().contains(
+            "sema-engine = { git = \"https://github.com/LiGoldragon/sema-engine.git\", rev = \"3333333333333333333333333333333333333333\" }"
         ),
-        "unexpected error: {error}"
+        "the rev-pinned entry stays rev-pinned"
     );
 }
 

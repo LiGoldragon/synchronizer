@@ -170,7 +170,26 @@ impl DependencyGraph {
             .iter()
             .map(|manifest| manifest.component().clone())
             .collect();
+        // A producer declared under several same-name manifest entries (the
+        // same crate in `[dependencies]` and `[dev-dependencies]`) yields one
+        // discovered edge per entry above; collapse them so the invariant
+        // "one edge per (consumer, producer, layer, local name)" holds. The
+        // layer's bump and report then run once, and the manifest editor
+        // redirects every textual entry behind that single edge.
+        let edges = Self::deduplicated(edges);
         Ok(Self { components, edges })
+    }
+
+    /// Remove duplicate edges while preserving first-occurrence order — the
+    /// order that drives the deterministic bump-and-report sequence.
+    fn deduplicated(edges: Vec<DependencyEdge>) -> Vec<DependencyEdge> {
+        let mut unique: Vec<DependencyEdge> = Vec::new();
+        for edge in edges {
+            if !unique.contains(&edge) {
+                unique.push(edge);
+            }
+        }
+        unique
     }
 
     pub fn edges(&self) -> &[DependencyEdge] {

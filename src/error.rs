@@ -59,10 +59,12 @@ pub enum Error {
     },
 
     /// A pin the mechanical bump must not touch: deliberately rev- or
-    /// tag-pinned, or aliased by several same-name entries. Bumping would
-    /// emit an invalid or lying manifest, so the bump fails loud and is
-    /// collected; the pin is left alone. Full multi-pin awareness is
-    /// future work.
+    /// tag-pinned, or a lock package recorded by several same-name git
+    /// entries at genuinely different revisions (no single target rev
+    /// repins them coherently). Bumping would emit an invalid or lying
+    /// manifest, so the bump fails loud and is collected; the pin is left
+    /// alone. (Several same-name *manifest* entries that all follow one
+    /// producer are not unbumpable — they are redirected coherently.)
     #[error("unbumpable pin: {consumer:?} -> {dependency}: {reason}")]
     UnbumpablePin {
         consumer: ComponentName,
@@ -134,8 +136,9 @@ pub enum UnbumpablePinReason {
     /// The entry pins a tag on purpose; a mechanical bump would lie about
     /// what the tag names.
     DeliberateTagPin,
-    /// Several same-name entries pin the producer; addressing by name
-    /// would silently alias the first match.
+    /// A lock records the producer under several same-name git entries at
+    /// genuinely different revisions; no single target rev repins them
+    /// coherently, and addressing by name would silently alias the first.
     MultipleEntries,
 }
 

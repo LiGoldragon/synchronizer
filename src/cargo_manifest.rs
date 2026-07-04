@@ -124,61 +124,65 @@ impl CargoManifest {
             .collect()
     }
 
-    /// Redirect the named git dependency to `reference` in the
-    /// format-preserving document, returning the previous reference.
+    /// Redirect every git dependency entry resolving to `name` to
+    /// `reference` in the format-preserving document, returning the previous
+    /// reference the entries shared.
     ///
     /// This is the cascade edit: a consumer pinning a bumped dependency is
     /// redirected from the mainline branch to the configured staging branch
-    /// so Cargo can reach the locked revision on a fresh clone. The document
-    /// is addressed by the entry's table *key*, which under a `package =`
-    /// rename differs from the resolved package name. Comments and layout
-    /// survive: only the one value changes.
+    /// so Cargo can reach the locked revision on a fresh clone. A producer
+    /// may be declared under several same-name entries (the same crate in
+    /// `[dependencies]` and `[dev-dependencies]`, or two keys sharing a
+    /// `package =` rename); every such entry follows the one producer, so
+    /// every match is redirected coherently — one edge, all its textual
+    /// entries. Each entry is addressed by its own table *key*, which under
+    /// a `package =` rename differs from the resolved package name, never by
+    /// the shared name. Comments and layout survive: only the branch values
+    /// change.
     ///
-    /// A deliberately rev- or tag-pinned entry, or a package pinned by
-    /// several same-name entries, fails loud ([`Error::UnbumpablePin`]):
-    /// inserting `branch` beside `rev` yields an invalid manifest, and
-    /// addressing by name would silently alias the first match.
+    /// A deliberately rev- or tag-pinned entry fails loud
+    /// ([`Error::UnbumpablePin`]) and leaves the manifest untouched:
+    /// inserting `branch` beside `rev` would emit an invalid manifest, and a
+    /// deliberate pin is a choice the mechanical bump must not override.
     pub fn redirect_git_dependency(
         &mut self,
         name: &DependencyName,
         reference: GitReference,
     ) -> Result<GitReference, Error> {
-        let mut matches: Vec<(DependencyTableKind, DependencyKey, GitSource)> = self
+        let matches: Vec<(DependencyTableKind, DependencyKey, GitSource)> = self
             .git_dependencies_with_tables()
             .into_iter()
             .filter(|(_, _, entry_name, _)| entry_name == name)
             .map(|(kind, key, _, source)| (kind, key, source))
             .collect();
-        if matches.len() > 1 {
-            return Err(Error::UnbumpablePin {
-                consumer: self.component.clone(),
-                dependency: name.as_str().to_string(),
-                reason: UnbumpablePinReason::MultipleEntries,
-            });
-        }
-        let Some((kind, key, source)) = matches.pop() else {
+        let Some((_, _, first)) = matches.first() else {
             return Err(Error::NotComponentDependency {
                 consumer: self.component.clone(),
                 dependency: name.as_str().to_string(),
             });
         };
-        let previous = source.reference;
-        match &previous {
-            GitReference::Revision(_) => {
-                return Err(Error::UnbumpablePin {
-                    consumer: self.component.clone(),
-                    dependency: name.as_str().to_string(),
-                    reason: UnbumpablePinReason::DeliberateRevisionPin,
-                });
+        let previous = first.reference.clone();
+        // Every same-name entry must be branch- or default-branch-declared:
+        // a deliberate rev/tag pin among them cannot be branch-redirected,
+        // so the whole redirect fails loud and the manifest stays untouched.
+        for (_, _, source) in &matches {
+            match &source.reference {
+                GitReference::Revision(_) => {
+                    return Err(Error::UnbumpablePin {
+                        consumer: self.component.clone(),
+                        dependency: name.as_str().to_string(),
+                        reason: UnbumpablePinReason::DeliberateRevisionPin,
+                    });
+                }
+                GitReference::Tag(_) => {
+                    return Err(Error::UnbumpablePin {
+                        consumer: self.component.clone(),
+                        dependency: name.as_str().to_string(),
+                        reason: UnbumpablePinReason::DeliberateTagPin,
+                    });
+                }
+                GitReference::Branch(_) | GitReference::DefaultBranch => {}
             }
-            GitReference::Tag(_) => {
-                return Err(Error::UnbumpablePin {
-                    consumer: self.component.clone(),
-                    dependency: name.as_str().to_string(),
-                    reason: UnbumpablePinReason::DeliberateTagPin,
-                });
-            }
-            GitReference::Branch(_) | GitReference::DefaultBranch => {}
         }
         let branch = match &reference {
             GitReference::Branch(branch) => branch.as_str().to_string(),
@@ -190,37 +194,42 @@ impl CargoManifest {
                 });
             }
         };
-        let document = self.document.as_document_mut();
-        let entry = document
-            .get_mut(kind.table_key())
-            .and_then(|table| table.get_mut(key.as_str()))
-            .ok_or_else(|| Error::ManifestEncode {
-                component: self.component.clone(),
-                layer: PinLayer::CargoManifest,
-                detail: format!("dependency key {} not found in document", key.as_str()),
-            })?;
-        match entry {
-            toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
-                table.insert("branch", toml_edit::Value::from(branch));
-            }
-            toml_edit::Item::Table(table) => {
-                table.insert("branch", toml_edit::value(branch));
-            }
-            other => {
-                return Err(Error::ManifestEncode {
+        for (kind, key, _) in &matches {
+            let document = self.document.as_document_mut();
+            let entry = document
+                .get_mut(kind.table_key())
+                .and_then(|table| table.get_mut(key.as_str()))
+                .ok_or_else(|| Error::ManifestEncode {
                     component: self.component.clone(),
                     layer: PinLayer::CargoManifest,
-                    detail: format!(
-                        "dependency key {} is not a table entry: {other:?}",
-                        key.as_str()
-                    ),
-                });
+                    detail: format!("dependency key {} not found in document", key.as_str()),
+                })?;
+            match entry {
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(table)) => {
+                    table.insert("branch", toml_edit::Value::from(branch.clone()));
+                }
+                toml_edit::Item::Table(table) => {
+                    table.insert("branch", toml_edit::value(branch.clone()));
+                }
+                other => {
+                    return Err(Error::ManifestEncode {
+                        component: self.component.clone(),
+                        layer: PinLayer::CargoManifest,
+                        detail: format!(
+                            "dependency key {} is not a table entry: {other:?}",
+                            key.as_str()
+                        ),
+                    });
+                }
             }
         }
-        // Keep the read model coherent with the document.
-        self.read
-            .table_mut(kind)
-            .set_branch(name, reference.clone());
+        // Keep the read model coherent with the document across every table
+        // the same-name entries live in.
+        for kind in DependencyTableKind::ALL {
+            self.read
+                .table_mut(kind)
+                .set_branch(name, reference.clone());
+        }
         Ok(previous)
     }
 

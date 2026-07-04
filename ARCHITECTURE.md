@@ -278,12 +278,19 @@ each is a typed model:
   format-preserving document is addressed by the table key
   (`DependencyKey`), never the resolved package name.
 - **Multi-pin and rev-pin safety.** A dependency deliberately pinned by
-  `rev =`/`?rev=` or tag, or a package pinned by several same-name
-  entries, is **unbumpable**: the bump fails loud (`Error::UnbumpablePin`,
-  a collected failure) instead of emitting an invalid `branch` + `rev`
-  manifest or silently aliasing the first matching entry. Until full
-  multi-pin awareness exists, sema-engine — which spirit pins at
-  deliberate old revisions — stays out of the first configured set.
+  `rev =`/`?rev=` or tag is **unbumpable**: the bump fails loud
+  (`Error::UnbumpablePin`, a collected failure) instead of emitting an
+  invalid `branch` + `rev` manifest. sema-engine — which spirit pins at
+  deliberate old revisions — therefore stays out of the first configured
+  set. A producer declared under **several same-name manifest entries**
+  (the same crate in `[dependencies]` and `[dev-dependencies]`, or two keys
+  sharing a `package =` rename) is *not* unbumpable: every such entry
+  follows the one producer, so topology collapses them to a single edge and
+  the manifest edit redirects **every** textual entry coherently, each
+  addressed by its own table key. A `Cargo.lock` that records the same
+  package under several same-name git entries at genuinely different
+  revisions *is* unbumpable — no single target rev repins them coherently —
+  and fails loud there.
 - **Transitive gaps** (`src/transitive_lock.rs`) — a typed lock edit cannot
   invent new transitive entries when the dependency's own dependency set
   changed at the target revision. The accepted controlled fallback for
@@ -336,8 +343,13 @@ tip:
 
 Each match is a `DependencyEdge { consumer, producer, layer }`; a consumer
 typically holds two edges to the same producer (`CargoLock` + `FlakeLock`),
-each bumped and reported independently. Anything pointing outside the
-configured set produces no edge. The result must be a DAG; a cycle is
+each bumped and reported independently. A producer named under several
+same-name entries of one layer (the same crate in `[dependencies]` and
+`[dev-dependencies]`) yields one edge per entry during discovery; those are
+collapsed so the invariant holds — one edge per (consumer, producer, layer,
+local name), the layer bumped once, the manifest edit redirecting every
+textual entry behind that edge. Anything pointing outside the configured set
+produces no edge. The result must be a DAG; a cycle is
 run-fatal (`Error::DependencyCycle`) because it admits no ascent order.
 `ascent_levels()` (Kahn) yields levels with the leaves — components with no
 component dependencies — at level 0, deterministic name order within a
@@ -543,11 +555,13 @@ branches pushed (`PushedBranch`), per-level verify results
      d  apply typed bumps (format-preserving writes):
           CargoLock      — repin revision + package version at target;
                            transitive gap => cargo update --precise fallback
-          CargoManifest  — redirect branch mainline -> staging   (cascade pins only)
+          CargoManifest  — redirect branch mainline -> staging   (cascade pins only;
+                           every same-name entry of the producer redirected)
           FlakeLock      — set rev; prefetch narHash (the only nix call
                            in the pin path); original always preserved
           FlakeManifest  — rewrite rev-in-URL                    (URL-pinned inputs only)
-          unbumpable pin (deliberate rev/tag pin, same-name aliasing)
+          unbumpable pin (deliberate rev/tag pin, or a lock's same-name
+                           multi-version aliasing)
                          => fail loud, collected, pin left alone
      e  commit the edited files on top of the remote mainline tip
         (author = configured CommitAuthor);
@@ -649,9 +663,12 @@ Test seeds — each of these should become a witness or review gate:
 - A verify never silently downgrades: check-enumeration failure is a
   collected failure (only genuine absence falls back to the default
   build), and a passed verification names its gate class in the report.
-- A deliberately rev- or tag-pinned dependency, or a package aliased by
-  several same-name entries, is never bumped mechanically: the bump fails
-  loud as a collected failure and the pin is left alone.
+- A deliberately rev- or tag-pinned dependency is never bumped
+  mechanically: the bump fails loud as a collected failure and the pin is
+  left alone. A producer under several same-name *manifest* entries is
+  bumped — every entry is redirected coherently — but a *lock* recording
+  the same package under several same-name git entries at different
+  revisions is not (no single target rev repins them).
 - The pin-editing path shells out only for `nix flake prefetch` (narHash)
   and, on a detected transitive gap, the controlled
   `cargo update --precise` fallback in a scratch tree; build execution

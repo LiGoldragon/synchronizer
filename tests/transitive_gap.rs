@@ -1,16 +1,17 @@
 //! Regression witness for the transitive-lock fallback's package identity.
 //!
-//! A consumer pins a producer under the repo/table key `nota-next`, with no
+//! A consumer pins a producer under the repo/table key `codec-repository`, with no
 //! `package =` rename, and its lock still records the crate name from before
-//! the producer dropped `-next` (the lock entry is `nota-next`). At the target
-//! revision the producer publishes the package `nota`. The typed lock repin
+//! the producer changed its crate identity (the lock entry is
+//! `codec-repository`). At the target revision the producer publishes the
+//! package `nota`. The typed lock repin
 //! cannot answer for the renamed crate's dependency set, so the controlled
 //! `cargo update --precise` fallback fires.
 //!
 //! The fallback must be invoked with the producer's Cargo *package name*
 //! (`nota`) — the identity `cargo update -p` addresses — never the repo/table
-//! key (`nota-next`). Passing the key yields `error: no matching package named
-//! nota-next` and leaves the invalid typed-edited lock committed. This witness
+//! key (`codec-repository`). Passing the key yields `error: no matching package named
+//! codec-repository` and leaves the invalid typed-edited lock committed. This witness
 //! drives the real driver through a resolver that mirrors cargo's spec matching
 //! (a spec naming no published package fails exactly as cargo does) and asserts
 //! both the package handed to the fallback and the refreshed lock that lands.
@@ -57,10 +58,10 @@ impl TransitiveLockResolver for SpecMatchingResolver {
     }
 }
 
-/// The producer: a repository named `nota-next` whose root crate is `nota`
-/// (the `-next` was dropped from the crate names). It carries a fresh
+/// The producer: a repository named `codec-repository` whose root crate is
+/// `nota`. It carries a fresh
 /// dependency that a stale consumer lock will not have recorded.
-fn nota_next_files() -> BTreeMap<String, String> {
+fn codec_repository_files() -> BTreeMap<String, String> {
     BTreeMap::from([
         (
             "Cargo.toml".to_string(),
@@ -88,7 +89,7 @@ fn nota_next_files() -> BTreeMap<String, String> {
     ])
 }
 
-/// The consumer: pins `nota-next` under the repo/table key, with no
+/// The consumer: pins `codec-repository` under the repo/table key, with no
 /// `package =` rename, and locks it under the pre-rename crate name.
 fn consumer_files() -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -100,7 +101,7 @@ fn consumer_files() -> BTreeMap<String, String> {
                 "version = \"0.1.0\"\n",
                 "\n",
                 "[dependencies]\n",
-                "nota-next = { git = \"https://github.com/LiGoldragon/nota-next.git\", branch = \"main\" }\n",
+                "codec-repository = { git = \"https://github.com/LiGoldragon/codec-repository.git\", branch = \"main\" }\n",
             )
             .to_string(),
         ),
@@ -113,12 +114,12 @@ fn consumer_files() -> BTreeMap<String, String> {
                     "[[package]]\n",
                     "name = \"consumer\"\n",
                     "version = \"0.1.0\"\n",
-                    "dependencies = [\n \"nota-next\",\n]\n",
+                    "dependencies = [\n \"codec-repository\",\n]\n",
                     "\n",
                     "[[package]]\n",
-                    "name = \"nota-next\"\n",
+                    "name = \"codec-repository\"\n",
                     "version = \"0.5.1\"\n",
-                    "source = \"git+https://github.com/LiGoldragon/nota-next.git?branch=main#{nota_old}\"\n",
+                    "source = \"git+https://github.com/LiGoldragon/codec-repository.git?branch=main#{nota_old}\"\n",
                 ),
                 nota_old = revision("nota-old").as_str()
             ),
@@ -141,7 +142,7 @@ fn refreshed_consumer_lock() -> String {
             "[[package]]\n",
             "name = \"nota\"\n",
             "version = \"0.6.0\"\n",
-            "source = \"git+https://github.com/LiGoldragon/nota-next.git?branch=main#{nota_new}\"\n",
+            "source = \"git+https://github.com/LiGoldragon/codec-repository.git?branch=main#{nota_new}\"\n",
         ),
         nota_new = revision("nota-new").as_str()
     )
@@ -149,10 +150,10 @@ fn refreshed_consumer_lock() -> String {
 
 #[test]
 fn the_fallback_updates_the_producer_package_not_the_repo_key() {
-    let nota_next = Rc::new(FixtureRepository::new(
-        "nota-next",
+    let codec_repository = Rc::new(FixtureRepository::new(
+        "codec-repository",
         revision("nota-new"),
-        nota_next_files(),
+        codec_repository_files(),
     ));
     let consumer = Rc::new(FixtureRepository::new(
         "consumer",
@@ -161,14 +162,20 @@ fn the_fallback_updates_the_producer_package_not_the_repo_key() {
     ));
     let opener = FixtureOpener {
         repositories: BTreeMap::from([
-            (ComponentName::new("nota-next"), Rc::clone(&nota_next)),
+            (
+                ComponentName::new("codec-repository"),
+                Rc::clone(&codec_repository),
+            ),
             (ComponentName::new("consumer"), Rc::clone(&consumer)),
         ]),
     };
     let verified = Rc::new(RefCell::new(Vec::new()));
     let requested = Rc::new(RefCell::new(Vec::new()));
     let config = standard_config(vec![
-        Component::new(ComponentName::new("nota-next"), ComponentCheckout::AtRoot),
+        Component::new(
+            ComponentName::new("codec-repository"),
+            ComponentCheckout::AtRoot,
+        ),
         Component::new(ComponentName::new("consumer"), ComponentCheckout::AtRoot),
     ]);
     let run = SynchronizerRun::with_boundaries(
@@ -209,7 +216,7 @@ fn the_fallback_updates_the_producer_package_not_the_repo_key() {
 
     // The committed consumer lock is the refreshed, valid lock — the entry is
     // the real crate name `nota` at the new revision, not the invalid
-    // typed-edited `nota-next` entry.
+    // typed-edited `codec-repository` entry.
     let consumer_tip = consumer
         .pushed
         .borrow()
@@ -225,7 +232,7 @@ fn the_fallback_updates_the_producer_package_not_the_repo_key() {
         "the committed lock is the refreshed valid lock:\n{committed_lock}",
     );
     assert!(
-        !committed_lock.contains("name = \"nota-next\""),
+        !committed_lock.contains("name = \"codec-repository\""),
         "the invalid pre-rename entry must not survive:\n{committed_lock}",
     );
 

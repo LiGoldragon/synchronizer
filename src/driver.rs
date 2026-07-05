@@ -873,8 +873,8 @@ impl SynchronizerRun {
     /// `[package] name` at the target revision.
     ///
     /// The consumer's recorded pin name is the repo/table key, which need not
-    /// be the package identity — a `nota-next`-keyed pin (or a lock entry left
-    /// from before the producer dropped `-next` from its crate names) resolves
+    /// be the package identity — a `codec-repository`-keyed pin (or a lock
+    /// entry left from before the producer changed crate names) resolves
     /// to the package `nota`. Edge discovery matches producers by git-URL
     /// repository identity, never by this name (ARCHITECTURE.md §4); the
     /// fallback's `-p` spec is the one place a package identity is required, so

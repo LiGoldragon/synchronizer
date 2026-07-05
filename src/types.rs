@@ -15,7 +15,7 @@ use winnow::token::take_while;
 /// repository name exactly, e.g. `signal-router`.
 ///
 /// This is a repository identity, not a crate name: a repository may publish
-/// a crate under a different package name (`nota-next` publishes `nota`).
+/// a crate under a different package name (`codec-repository` publishes `nota`).
 /// Topology matching always goes through repository identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, NotaDecode, NotaEncode)]
 pub struct ComponentName(String);

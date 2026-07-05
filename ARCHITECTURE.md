@@ -272,8 +272,8 @@ each is a typed model:
   header included, survives byte-for-byte outside the edited entries.
 - **Package name vs repository name vs table key.** A Cargo dependency
   resolves to a package name that may differ from the repository name
-  (`nota` lives in `nota-next`) *and* from the dependency table key
-  (`nota-next = { package = "nota", ... }`). Component matching goes
+  (`nota` lives in `codec-repository`) *and* from the dependency table key
+  (`codec-repository = { package = "nota", ... }`). Component matching goes
   through the git URL's repository identity, never the package name; the
   format-preserving document is addressed by the table key
   (`DependencyKey`), never the resolved package name.

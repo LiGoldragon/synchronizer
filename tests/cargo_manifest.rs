@@ -18,8 +18,8 @@ publish      = false
 
 [dependencies]
 # The typed NOTA reader — the canonical codec every schema decode goes
-# through. Renamed package: the repository is nota-next.
-nota       = { package = "nota", git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
+# through. Renamed package: the repository is codec-repository.
+nota       = { package = "nota", git = "https://github.com/LiGoldragon/codec-repository.git", branch = "main" }
 serde      = { version = "1", features = ["derive"] }
 # The wire frame carrying every socket payload. Version skew here is the
 # rkyv decode failure class the synchronizer exists to kill.
@@ -59,7 +59,7 @@ fn cascade_redirect_preserves_comments_and_layout() {
 }
 
 /// A manifest whose dependency key differs from the resolved package name
-/// (`nota-next = { package = "nota", ... }` — the real corpus shape), one
+/// (`codec-repository = { package = "nota", ... }` — the real corpus shape), one
 /// deliberately rev-pinned entry, and one package aliased by two entries.
 const RENAMED_AND_PINNED_MANIFEST: &str = r#"[package]
 name    = "consumer"
@@ -68,7 +68,7 @@ version = "0.1.0"
 [dependencies]
 # Renamed: the table key is the repository-flavored name, the package the
 # crate name. The document must be addressed by the key.
-nota-next   = { package = "nota", git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
+codec-repository   = { package = "nota", git = "https://github.com/LiGoldragon/codec-repository.git", branch = "main" }
 # Deliberately pinned at an old revision (the sema-engine case).
 sema-engine = { git = "https://github.com/LiGoldragon/sema-engine.git", rev = "3333333333333333333333333333333333333333" }
 signal-frame = { git = "https://github.com/LiGoldragon/signal-frame.git", branch = "main" }
@@ -79,7 +79,7 @@ signal-frame-dev = { package = "signal-frame", git = "https://github.com/LiGoldr
 "#;
 
 /// The cascade redirect addresses the document by the entry's table key,
-/// not the resolved package name: `nota` lives under the `nota-next` key.
+/// not the resolved package name: `nota` lives under the `codec-repository` key.
 #[test]
 fn cascade_redirect_addresses_renamed_dependencies_by_table_key() {
     let component = ComponentName::new("consumer");
@@ -94,8 +94,8 @@ fn cascade_redirect_addresses_renamed_dependencies_by_table_key() {
     assert_eq!(previous, GitReference::Branch(BranchName::new("main")));
     let rendered = manifest.to_toml_text();
     let expected = RENAMED_AND_PINNED_MANIFEST.replace(
-        "nota-next   = { package = \"nota\", git = \"https://github.com/LiGoldragon/nota-next.git\", branch = \"main\" }",
-        "nota-next   = { package = \"nota\", git = \"https://github.com/LiGoldragon/nota-next.git\", branch = \"synchronizer\" }",
+        "codec-repository   = { package = \"nota\", git = \"https://github.com/LiGoldragon/codec-repository.git\", branch = \"main\" }",
+        "codec-repository   = { package = \"nota\", git = \"https://github.com/LiGoldragon/codec-repository.git\", branch = \"synchronizer\" }",
     );
     assert_eq!(
         rendered.as_str(),
@@ -188,7 +188,7 @@ fn reading_finds_git_dependencies_with_package_renames() {
     let (_, nota_source) = &dependencies[0];
     assert_eq!(
         nota_source.url().as_str(),
-        "https://github.com/LiGoldragon/nota-next.git"
+        "https://github.com/LiGoldragon/codec-repository.git"
     );
     assert_eq!(
         manifest.package_version().map(|version| version.as_str()),

@@ -70,7 +70,7 @@ fn cargo_component(component: &str, dependencies: &[(&str, &str, &str)]) -> Comp
 
 #[test]
 fn edges_come_only_from_manifests_matched_by_repository_identity() {
-    // The `nota` package lives in the `nota-next` repository: matching must
+    // The `nota` package lives in the `codec-repository` repository: matching must
     // follow the git URL, never the package name.
     let files = BTreeMap::from([
         (
@@ -81,10 +81,10 @@ fn edges_come_only_from_manifests_matched_by_repository_identity() {
                 "version = \"0.1.0\"\n",
                 "\n",
                 "[dependencies]\n",
-                "nota = { package = \"nota\", git = \"https://github.com/LiGoldragon/nota-next.git\", branch = \"main\" }\n",
+                "nota = { package = \"nota\", git = \"https://github.com/LiGoldragon/codec-repository.git\", branch = \"main\" }\n",
                 "serde = \"1\"\n",
                 "outside = { git = \"https://github.com/SomeoneElse/outside.git\", branch = \"main\" }\n",
-                "impostor = { git = \"https://github.com/SomeoneElse/nota-next.git\", branch = \"main\" }\n",
+                "impostor = { git = \"https://github.com/SomeoneElse/codec-repository.git\", branch = \"main\" }\n",
             )
             .to_string(),
         ),
@@ -101,22 +101,22 @@ fn edges_come_only_from_manifests_matched_by_repository_identity() {
                     "[[package]]\n",
                     "name = \"nota\"\n",
                     "version = \"0.5.1\"\n",
-                    "source = \"git+https://github.com/LiGoldragon/nota-next.git?branch=main#{rev}\"\n",
+                    "source = \"git+https://github.com/LiGoldragon/codec-repository.git?branch=main#{rev}\"\n",
                 ),
                 rev = revision("nota-old").as_str()
             ),
         ),
     ]);
     let consumer = manifests_for("consumer", files);
-    let nota_next = cargo_component("nota-next", &[]);
-    let config = config_for(&["consumer", "nota-next"]);
-    let graph = DependencyGraph::discover(&config, &[consumer, nota_next])
+    let codec_repository = cargo_component("codec-repository", &[]);
+    let config = config_for(&["consumer", "codec-repository"]);
+    let graph = DependencyGraph::discover(&config, &[consumer, codec_repository])
         .expect("fixture topology discovers");
     let consumer_name = ComponentName::new("consumer");
     let edges = graph.dependencies_of(&consumer_name);
     assert_eq!(edges.len(), 2, "one manifest edge and one lock edge");
     for edge in &edges {
-        assert_eq!(edge.producer(), &ComponentName::new("nota-next"));
+        assert_eq!(edge.producer(), &ComponentName::new("codec-repository"));
         assert!(matches!(
             edge.local_name(),
             LocalPinName::CargoPackage(name) if name.as_str() == "nota"

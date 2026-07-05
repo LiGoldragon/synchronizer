@@ -17,7 +17,7 @@ use crate::topology::PinLayer;
 use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl, TomlText};
 
 /// A resolved *package* name: the dependency table key with a `package =`
-/// rename applied. It may differ from both the table key (`nota-next =
+/// rename applied. It may differ from both the table key (`codec-repository =
 /// { package = "nota", ... }`) and the repository name; component matching
 /// goes through the git URL, never this name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]

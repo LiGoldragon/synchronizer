@@ -1,7 +1,7 @@
 //! Coordinated cross-branch staged-verify witness.
 //!
 //! Models the rename-migration flow: a set of producers is already staged on a
-//! staging branch (`drop-next`) with rewritten identity, and a multi-level
+//! staging branch (`main`) with rewritten identity, and a multi-level
 //! consumer staged there still declares its producers `branch = "main"`. Under
 //! `BaseSelection::StagedCascade` the run reads each component at its staging
 //! tip where it exists, seeds the cascade ledger with those tips, and the
@@ -10,11 +10,11 @@
 //! reintroducing a producer's un-rewritten mainline.
 //!
 //!   nota  (leaf, not staged: read at main; already publishes the new name)
-//!   schema      (staged on drop-next; its own nota pin already aligned to main)
-//!   schema-rust (staged on drop-next; pins schema at schema@main — must cascade
-//!                to schema@drop-next, or an isolated verify pulls schema@main)
+//!   schema      (staged on main; its own nota pin already aligned to main)
+//!   schema-rust (staged on main; pins schema at schema@main — must cascade
+//!                to schema@main, or an isolated verify pulls schema@main)
 //!
-//! The staging branch here is `drop-next`, not `synchronizer` — the branch
+//! The staging branch here is `main`, not `synchronizer` — the branch
 //! names are configuration, so the same generic cascade drives any scheme.
 
 mod fixtures;
@@ -147,7 +147,7 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
         revision("nota-main"),
         nota_files(),
     ));
-    // schema and schema-rust are already staged on `drop-next`. Their `main`
+    // schema and schema-rust are already staged on `main`. Their `main`
     // trees are never read under StagedCascade; the staging tree is authoritative.
     let schema = Rc::new(
         FixtureRepository::new("schema", revision("schema-main"), schema_drop_files())
@@ -175,7 +175,7 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
             Component::new(ComponentName::new("schema"), ComponentCheckout::AtRoot),
             Component::new(ComponentName::new("schema-rust"), ComponentCheckout::AtRoot),
         ],
-        BranchScheme::new(BranchName::new("main"), BranchName::new("drop-next")),
+        BranchScheme::new(BranchName::new("main"), BranchName::new("main")),
     );
     let run = SynchronizerRun::with_boundaries(
         config,
@@ -224,7 +224,7 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
 
     // Level 2: schema-rust cascades. Its schema pin resolves to schema's
     // *staging* tip (the ledger seeded from the pre-staged set), so the manifest
-    // redirects branch main -> drop-next and the lock repins to the staging tip;
+    // redirects branch main -> main and the lock repins to the staging tip;
     // its nota pin, resolving to nota's main tip, is untouched.
     let schema_rust_outcome = &levels[2].repositories()[0];
     let Action::Bumped(bump) = schema_rust_outcome.action() else {
@@ -243,7 +243,7 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
     );
     assert_eq!(
         manifest_bump.next(),
-        &PinValue::Reference(BranchName::new("drop-next")),
+        &PinValue::Reference(BranchName::new("main")),
         "the schema pin redirects to the configured staging branch, not `synchronizer`"
     );
     let schema_lock_bump = bump
@@ -269,15 +269,15 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
     // The committed consumer tree is self-consistent for an isolated verify:
     // schema now points at the staging branch, nota stays on main.
     let tip = bump.pushed().tip().clone();
-    assert_eq!(bump.pushed().branch(), &BranchName::new("drop-next"));
+    assert_eq!(bump.pushed().branch(), &BranchName::new("main"));
     let committed_manifest = schema_rust
         .file_text(&tip, "Cargo.toml")
         .expect("the cascade commit carries the manifest");
     assert!(
         committed_manifest.contains(
-            "schema = { package = \"schema\", git = \"https://github.com/LiGoldragon/schema.git\", branch = \"drop-next\" }"
+            "schema = { package = \"schema\", git = \"https://github.com/LiGoldragon/schema.git\", branch = \"main\" }"
         ),
-        "schema is redirected to drop-next: {committed_manifest}"
+        "schema is redirected to main: {committed_manifest}"
     );
     assert!(
         committed_manifest.contains(
@@ -290,10 +290,10 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
         .expect("the cascade commit carries the lock");
     assert!(
         committed_lock.contains(&format!(
-            "?branch=drop-next#{}",
+            "?branch=main#{}",
             revision("schema-drop").as_str()
         )),
-        "the schema lock entry now resolves against drop-next: {committed_lock}"
+        "the schema lock entry now resolves against main: {committed_lock}"
     );
     assert!(
         committed_lock.contains(&format!("?branch=main#{}", revision("nota-main").as_str())),

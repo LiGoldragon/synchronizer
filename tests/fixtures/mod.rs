@@ -44,7 +44,7 @@ pub fn standard_config(components: Vec<Component>) -> SynchronizerConfig {
 
 /// As [`standard_config`], with the branch scheme supplied by the caller. Both
 /// branch names are configuration, never a fixture constant, so a coordinated
-/// cross-branch witness drives its own staging branch (e.g. `drop-next`)
+/// cross-branch witness drives its own staging branch (e.g. `main`)
 /// through the same generic paths.
 pub fn standard_config_with_scheme(
     components: Vec<Component>,

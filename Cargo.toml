@@ -17,6 +17,7 @@ name = "synchronizer"
 path = "src/main.rs"
 
 [dependencies]
+blake3     = "1"
 gix        = { version = "0.85", features = ["tree-editor"] }
 nota       = { package = "nota", git = "https://github.com/LiGoldragon/nota.git", branch = "main" }
 serde      = { version = "1", features = ["derive"] }

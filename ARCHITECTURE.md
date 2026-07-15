@@ -711,3 +711,58 @@ into the sections above:
    criome data; the criome instance lives at `goldragon/synchronizer.nota`
    (§3a). The cascade rule and the flake-input `original`-preservation rule
    stay in code because they are deterministic, not project-varying.
+
+## 15. Epic release-train development
+
+A release train is a bounded integration lifecycle distinct from ordinary
+cascade propagation. The authored `release-trains/<name>.nota` document
+contains only train membership, selectors, expected bases, and explicitly
+admitted immutable externals. It is intent, never a substitute for a Cargo or
+Nix lock. The resolver fetches selected pushed refs, converts them to immutable
+commits, discovers topology from the selected manifests, and rejects any graph
+that differs from the declared boundary.
+
+```text
+ReleaseTrainIntent (NOTA)
+  → ResolvedReleaseTrain (typed, domain-separated BLAKE3 identity)
+  → per-component candidate Cargo.lock + flake.lock
+  → canonical release-train.lock.json + fixed-source integration flake
+  → remote Nix checks
+```
+
+The candidate namespace is `train/<name>` and is tool-owned; no train writes a
+worker branch or mainline. A component's selected branch must still have the
+recorded expected base when materialization begins. A moved selector produces a
+new resolution or a loud failure, never a silent mutation of an accepted
+closure. Candidate commits and all source attestations are immutable inputs to
+remote verification.
+
+### 15.1 Truth boundaries
+
+Manifests remain topology truth. Intent constrains discovery: every discovered
+internal component must be declared, every declared component must be present,
+and an external edge must match an explicit `(component, commit)` admission.
+Cargo manifests/locks are generated per consumer from that consumer's exact
+manifest graph; a universal Cargo.lock is invalid. `flake.lock` continues to
+carry Nix input evidence. `release-train.lock.json` is a canonical projection
+for `builtins.fromJSON`, not either lock format.
+
+A resolved closure identity covers selected/candidate commits, source
+attestations, and component lock identities under the
+`LiGoldragon.release-train.resolved.v1` domain. Its payload never carries local
+paths or branch names as build identity. The integration flake fetches only
+commit/narHash pairs.
+
+### 15.2 Deferred reuse and TextualJson
+
+A future immutable vendor/source index may record Cargo-validated registry
+checksums or Git commit evidence plus fixed-output materialization identities.
+It is not a mutable registry and is intentionally represented only by a typed
+`VendorSnapshotReference` seam today. Nix already safely reuses identical
+build derivations; compiled-output indexing is deferred until measurements show
+identical complete derivation keys.
+
+JSON is a bootstrap projection with deterministic serde output so Nix can
+consume a closure now. The typed closure is the authority. A future TextualJson
+implementation replaces that projection boundary without changing closure
+identity or making Synchronizer depend on the language-family implementation.

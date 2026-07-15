@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nota::{NotaDecode, NotaEncode};
+use serde::Serialize;
 use winnow::Parser;
 use winnow::combinator::opt;
 use winnow::token::take_while;
@@ -17,7 +18,7 @@ use winnow::token::take_while;
 /// This is a repository identity, not a crate name: a repository may publish
 /// a crate under a different package name (`codec-repository` publishes `nota`).
 /// Topology matching always goes through repository identity.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, NotaDecode, NotaEncode)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, NotaDecode, NotaEncode, Serialize)]
 pub struct ComponentName(String);
 
 impl ComponentName {
@@ -31,7 +32,7 @@ impl ComponentName {
 }
 
 /// A git commit identifier (full 40-hex object id).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NotaDecode, NotaEncode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NotaDecode, NotaEncode, Serialize)]
 pub struct CommitIdentifier(String);
 
 impl CommitIdentifier {
@@ -58,7 +59,7 @@ impl CommitIdentifier {
 /// branch every bump is pushed to) are supplied by configuration through
 /// [`crate::configuration::BranchScheme`]. Nothing here assumes `main` or
 /// `synchronizer`.
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode)]
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode, NotaEncode, Serialize)]
 pub struct BranchName(String);
 
 impl BranchName {
@@ -217,7 +218,7 @@ impl AuthorEmail {
 }
 
 /// An SRI narHash as produced by `nix flake prefetch`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NarHash(String);
 
 impl NarHash {

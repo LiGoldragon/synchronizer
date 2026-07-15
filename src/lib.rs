@@ -21,6 +21,7 @@ pub mod error;
 pub mod flake_lock;
 pub mod flake_manifest;
 pub mod git_repository;
+pub mod release_train;
 pub mod report;
 pub mod role_resolution;
 pub mod toml_document;

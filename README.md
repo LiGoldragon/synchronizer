@@ -32,6 +32,22 @@ Entrypoint:
 - `cargo run --example validate -- <configuration.nota>` — decode-only
   config check; performs no git, nix, or network operation.
 
+## Epic release trains
+
+`release-trains/<name>.nota` is a separate authored intent surface; it does
+not extend operational synchronizer configuration or replace Cargo/flake
+locks. A train resolves branch selectors to immutable commits, validates that
+manifest-discovered topology stays within its declared component set, requires
+an exact expected base for each component, and permits external components
+only when their exact immutable commit is explicitly admitted.
+
+The typed `release_train` module emits a domain-separated closure identity,
+canonical `release-train.lock.json`, component-local lock identities, and an
+integration flake that contains only `github:<owner>/<repo>/<commit>` plus
+`narHash` sources. The source/vendor seam is data-only until measured cache
+reuse justifies a separate immutable index. See `release-trains/README.md` and
+`ARCHITECTURE.md` §15.
+
 Status: implemented against the psyche-signed `ARCHITECTURE.md`, including
 the universality refactor (all project data externalized to config); not yet
 run against live component repositories.

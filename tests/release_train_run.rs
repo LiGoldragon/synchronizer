@@ -13,9 +13,10 @@ use fixtures::{
 use synchronizer::configuration::{Component, ComponentCheckout};
 use synchronizer::driver::{RunBoundaries, SynchronizerRun};
 use synchronizer::release_train::{
-    CandidateSelector, ReleaseTrainIntent, ReleaseTrainName, TrainComponent,
+    CandidateSelector, ComponentLockIdentity, NixSourceAttestation, ReleaseTrainIntent,
+    ReleaseTrainName, TrainComponent,
 };
-use synchronizer::types::{BranchName, BuilderHost, ComponentName};
+use synchronizer::types::{BranchName, BuilderHost, ComponentName, NarHash};
 
 struct TrainRunFixture;
 
@@ -119,4 +120,42 @@ fn live_train_resolution_materializes_scoped_candidate_branches_from_pushed_trut
     assert_eq!(nota.pushed.borrow().len(), 1);
     assert_eq!(schema_language.pushed.borrow().len(), 1);
     assert_eq!(schema_rust.pushed.borrow().len(), 1);
+
+    let attestations = materialized
+        .selectors()
+        .iter()
+        .map(|selector| {
+            NixSourceAttestation::new(
+                selector.component().clone(),
+                selector.candidate().clone(),
+                NarHash::new(format!("sha256-{}", selector.component().as_str())),
+            )
+        })
+        .collect();
+    let locks = materialized
+        .selectors()
+        .iter()
+        .map(|selector| {
+            ComponentLockIdentity::from_text(
+                selector.component().clone(),
+                "synthetic Cargo.lock",
+                "synthetic flake.lock",
+            )
+        })
+        .collect();
+    let members = materialized
+        .selectors()
+        .iter()
+        .map(|selector| selector.component().clone())
+        .collect();
+    let closure = materialized
+        .resolve_closure(attestations, locks, members, BTreeMap::new())
+        .expect("materialized candidates emit an immutable closure");
+    let artifact_directory = tempfile::tempdir().expect("artifact directory");
+    let artifacts = closure
+        .write_integration_artifacts(artifact_directory.path(), "LiGoldragon")
+        .expect("portable Nix artifacts emit");
+    let generated_flake = std::fs::read_to_string(artifacts.flake_path()).expect("generated flake");
+    assert!(generated_flake.contains("github:LiGoldragon/nota/"));
+    assert!(!generated_flake.contains("path:"));
 }

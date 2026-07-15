@@ -108,6 +108,28 @@ impl SynchronizerConfig {
         &self.branch_scheme
     }
 
+    /// Select an isolated component subset and an owned candidate branch for
+    /// one release train without changing operational configuration on disk.
+    pub fn release_train_view(
+        &self,
+        component_names: &[ComponentName],
+        candidate_branch: BranchName,
+    ) -> Result<Self, Error> {
+        let components = component_names
+            .iter()
+            .map(|name| self.component(name).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::new(
+            self.forge.clone(),
+            self.checkout_root.clone(),
+            components,
+            BranchScheme::new(self.branch_scheme.mainline().clone(), candidate_branch),
+            self.builder_resolution.clone(),
+            self.verify_policy.clone(),
+            self.commit_author.clone(),
+        ))
+    }
+
     pub fn builder_resolution(&self) -> &BuilderResolution {
         &self.builder_resolution
     }

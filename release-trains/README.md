@@ -10,6 +10,16 @@ schema-rust train. NOTA is fixed to the pushed green `18e2e8d0dba37e9e84045af360
 branches are deliberate placeholders: resolution must reject them until their
 pushed branch tips and expected bases are recorded.
 
+Run a real train only after every selected producer branch is pushed:
+
+```sh
+synchronizer release-train <synchronizer.nota> release-trains/<name>.nota
+```
+
+The command verifies selector ancestry, creates only `train/<name>` candidate
+branches, then runs the existing typed per-consumer Cargo/flake cascade and
+remote verification against those candidates. It does not merge anything.
+
 A resolved train has these projections:
 
 ```text

@@ -150,6 +150,18 @@ impl ComponentRepository for FixtureRepository {
         Ok(())
     }
 
+    fn remote_branch_tip(&self, _branch: &BranchName) -> Result<Option<CommitIdentifier>, Error> {
+        Ok(self.staging_tip.clone())
+    }
+
+    fn base_is_ancestor(
+        &self,
+        base: &CommitIdentifier,
+        selected: &CommitIdentifier,
+    ) -> Result<bool, Error> {
+        Ok(base == selected || base == &self.main_tip)
+    }
+
     fn file_at(
         &self,
         revision: &CommitIdentifier,
@@ -201,6 +213,15 @@ impl ComponentRepository for FixtureRepository {
         self.pushed.borrow_mut().push(commit.clone());
         Ok(())
     }
+
+    fn push_train_branch(
+        &self,
+        _branch: &BranchName,
+        commit: &CommitIdentifier,
+    ) -> Result<(), Error> {
+        self.pushed.borrow_mut().push(commit.clone());
+        Ok(())
+    }
 }
 
 /// Hands out shared fixture repositories by component name.
@@ -223,6 +244,18 @@ impl ComponentRepository for SharedRepository {
 
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error> {
         self.0.fetch(revision)
+    }
+
+    fn remote_branch_tip(&self, branch: &BranchName) -> Result<Option<CommitIdentifier>, Error> {
+        self.0.remote_branch_tip(branch)
+    }
+
+    fn base_is_ancestor(
+        &self,
+        base: &CommitIdentifier,
+        selected: &CommitIdentifier,
+    ) -> Result<bool, Error> {
+        self.0.base_is_ancestor(base, selected)
     }
 
     fn file_at(
@@ -248,6 +281,14 @@ impl ComponentRepository for SharedRepository {
 
     fn push_synchronizer_branch(&self, commit: &CommitIdentifier) -> Result<(), Error> {
         self.0.push_synchronizer_branch(commit)
+    }
+
+    fn push_train_branch(
+        &self,
+        branch: &BranchName,
+        commit: &CommitIdentifier,
+    ) -> Result<(), Error> {
+        self.0.push_train_branch(branch, commit)
     }
 }
 

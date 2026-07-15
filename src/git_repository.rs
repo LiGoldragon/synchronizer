@@ -25,7 +25,7 @@ use gix::objs::tree::EntryKind;
 
 use crate::configuration::{BranchScheme, CommitAuthor};
 use crate::error::{Error, GitOperation};
-use crate::types::{CommitIdentifier, ComponentName, RepositoryUrl};
+use crate::types::{BranchName, CommitIdentifier, ComponentName, RepositoryUrl};
 
 /// The git surface the driver needs from one component. [`GitRepository`]
 /// is the production implementation; fixture implementations drive the
@@ -44,6 +44,23 @@ pub trait ComponentRepository {
     /// Fetch `revision` into the local object store so files at that
     /// revision can be read.
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error>;
+
+    /// Resolve an explicitly selected release-train branch. The ordinary
+    /// cascade only needs main/staging; release trains select source branches
+    /// before creating their owned candidate branch.
+    fn remote_branch_tip(&self, _branch: &BranchName) -> Result<Option<CommitIdentifier>, Error> {
+        Ok(None)
+    }
+
+    /// Whether `base` remains in the selected commit's history. This prevents
+    /// silently reusing a moved or rebased feature branch for an accepted train.
+    fn base_is_ancestor(
+        &self,
+        base: &CommitIdentifier,
+        selected: &CommitIdentifier,
+    ) -> Result<bool, Error> {
+        Ok(base == selected)
+    }
 
     /// Read one file's text at `revision` from the object store. `None`
     /// when the file does not exist at that revision.
@@ -72,6 +89,16 @@ pub trait ComponentRepository {
     /// overwriting any previous run's branch. The branch is staging surface
     /// owned by this tool; force-updating it is the designed behavior.
     fn push_synchronizer_branch(&self, commit: &CommitIdentifier) -> Result<(), Error>;
+
+    /// Push an explicitly scoped train candidate branch. Fixture surfaces may
+    /// map it to the ordinary staging push; production keeps the branch name.
+    fn push_train_branch(
+        &self,
+        _branch: &BranchName,
+        commit: &CommitIdentifier,
+    ) -> Result<(), Error> {
+        self.push_synchronizer_branch(commit)
+    }
 }
 
 /// One component's production git surface.
@@ -171,18 +198,39 @@ impl ComponentRepository for GitRepository {
     }
 
     fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error> {
-        let staging_ref = format!("refs/heads/{}", self.branch_scheme.staging().as_str());
+        self.remote_branch_tip(self.branch_scheme.staging())
+    }
+
+    fn remote_branch_tip(&self, branch: &BranchName) -> Result<Option<CommitIdentifier>, Error> {
+        let branch_ref = format!("refs/heads/{}", branch.as_str());
         let stdout = self.run_plumbing(
             GitOperation::RemoteQuery,
-            &["ls-remote", self.remote_url.as_str(), staging_ref.as_str()],
+            &["ls-remote", self.remote_url.as_str(), branch_ref.as_str()],
         )?;
-        // An absent staging branch answers with empty output — data, not a
-        // failure: the component simply was not pre-staged this run.
         Ok(stdout
             .split_whitespace()
             .next()
             .filter(|tip| CommitIdentifier::is_full_object_id(tip))
             .map(CommitIdentifier::new))
+    }
+
+    fn base_is_ancestor(
+        &self,
+        base: &CommitIdentifier,
+        selected: &CommitIdentifier,
+    ) -> Result<bool, Error> {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.clone_path)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                base.as_str(),
+                selected.as_str(),
+            ])
+            .status()
+            .map_err(|error| self.git_error(GitOperation::ObjectRead, error.to_string()))?;
+        Ok(status.success())
     }
 
     fn fetch(&self, revision: &CommitIdentifier) -> Result<(), Error> {
@@ -304,8 +352,15 @@ impl ComponentRepository for GitRepository {
     }
 
     fn push_synchronizer_branch(&self, commit: &CommitIdentifier) -> Result<(), Error> {
-        let staging = self.branch_scheme.staging();
-        let refspec = format!("+{}:refs/heads/{}", commit.as_str(), staging.as_str());
+        self.push_train_branch(self.branch_scheme.staging(), commit)
+    }
+
+    fn push_train_branch(
+        &self,
+        branch: &BranchName,
+        commit: &CommitIdentifier,
+    ) -> Result<(), Error> {
+        let refspec = format!("+{}:refs/heads/{}", commit.as_str(), branch.as_str());
         self.run_plumbing(
             GitOperation::Push,
             &["push", self.remote_url.as_str(), refspec.as_str()],

@@ -22,6 +22,7 @@ use crate::flake_lock::{NarHashSource, NixFlakePrefetch, PinnedFlakeReference, P
 use crate::git_repository::{
     CommitMessage, ComponentRepository, FileEdit, GitRepository, RepositoryFilePath,
 };
+use crate::release_train::{ReleaseTrainIntent, ReleaseTrainRun};
 use crate::report::{
     Action, AppliedBump, BumpRecord, Failure, FailureDetail, FailureStage, LevelOutcome, PinValue,
     PushedBranch, RepositoryOutcome, SynchronizerReport, Verification,
@@ -172,6 +173,28 @@ pub struct RunBoundaries {
     pub lock_resolver: Box<dyn TransitiveLockResolver>,
 }
 
+impl RunBoundaries {
+    /// Assemble the production object boundaries from configuration; fixtures
+    /// use the public record directly to keep remote effects synthetic.
+    pub fn from_config(config: &SynchronizerConfig) -> Self {
+        let repository_opener = Box::new(GitRepositoryOpener::from_path_environment(
+            config.branch_scheme().clone(),
+            config.commit_author().clone(),
+        ));
+        let builder_host_resolver = Box::new(ConfiguredBuilderHost::new(
+            config.builder_resolution().clone(),
+        ));
+        let verifier_source = Box::new(BuildVerifierSource::new(config.verify_policy().clone()));
+        Self {
+            repository_opener,
+            nar_hash_source: Box::new(NixFlakePrefetch::from_path_environment()),
+            builder_host_resolver,
+            verifier_source,
+            lock_resolver: Box::new(CargoUpdatePrecise::from_path_environment()),
+        }
+    }
+}
+
 /// One synchronizer run.
 pub struct SynchronizerRun {
     config: SynchronizerConfig,
@@ -201,24 +224,8 @@ impl SynchronizerRun {
     /// project-specific choice — branch scheme, commit author, builder-host
     /// strategy, verify policy — is read from `config`; none is hard-coded.
     pub fn new(config: SynchronizerConfig) -> Self {
-        let repository_opener = Box::new(GitRepositoryOpener::from_path_environment(
-            config.branch_scheme().clone(),
-            config.commit_author().clone(),
-        ));
-        let builder_host_resolver = Box::new(ConfiguredBuilderHost::new(
-            config.builder_resolution().clone(),
-        ));
-        let verifier_source = Box::new(BuildVerifierSource::new(config.verify_policy().clone()));
-        Self::with_boundaries(
-            config,
-            RunBoundaries {
-                repository_opener,
-                nar_hash_source: Box::new(NixFlakePrefetch::from_path_environment()),
-                builder_host_resolver,
-                verifier_source,
-                lock_resolver: Box::new(CargoUpdatePrecise::from_path_environment()),
-            },
-        )
+        let boundaries = RunBoundaries::from_config(&config);
+        Self::with_boundaries(config, boundaries)
     }
 
     /// Compose a run with explicit boundaries (fixture surface for ascent
@@ -237,6 +244,16 @@ impl SynchronizerRun {
     pub fn with_base_selection(mut self, base_selection: BaseSelection) -> Self {
         self.base_selection = base_selection;
         self
+    }
+
+    /// Construct the typed release-train flow from the same repository,
+    /// Cargo/flake, and verification boundaries as ordinary synchronization.
+    pub fn release_train(
+        config: SynchronizerConfig,
+        intent: ReleaseTrainIntent,
+        boundaries: RunBoundaries,
+    ) -> ReleaseTrainRun {
+        ReleaseTrainRun::new(config, intent, boundaries)
     }
 
     /// The component-name field run-scoped failures (builder-host

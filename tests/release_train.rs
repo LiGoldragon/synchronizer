@@ -125,10 +125,10 @@ impl TrainFixture {
 }
 
 #[test]
-fn authored_language_family_intent_is_an_independent_nota_document() {
-    let intent = ReleaseTrainIntent::from_nota_text(include_str!(
-        "../release-trains/language-family-poc.nota"
-    ))
+fn authored_language_family_intent_shape_is_an_independent_nota_document() {
+    let intent = ReleaseTrainIntent::from_nota_text(
+        "(language-family-poc [(nota (Branch next-gen) 18e2e8d0dba37e9e84045af3608585b51f6e3b36) (schema-language (Branch poc-structural) 0000000000000000000000000000000000000000) (schema-rust Mainline 0000000000000000000000000000000000000000)] [])",
+    )
     .expect("seed intent decodes");
     assert_eq!(intent.name().as_str(), "language-family-poc");
     assert_eq!(intent.components().len(), 3);
@@ -157,6 +157,15 @@ fn release_train_closure_is_canonical_and_contains_only_immutable_nix_sources() 
         !flake.contains("path:"),
         "integration flake must be portable: {flake}"
     );
+    let artifact_directory = tempfile::tempdir().expect("artifact directory");
+    let artifacts = closure
+        .write_integration_artifacts(artifact_directory.path(), "LiGoldragon")
+        .expect("P2 artifacts emit");
+    let emitted_json = std::fs::read_to_string(artifacts.json_path()).expect("generated JSON");
+    let emitted_flake = std::fs::read_to_string(artifacts.flake_path()).expect("generated flake");
+    assert_eq!(emitted_json, json);
+    assert_eq!(emitted_flake, flake);
+    assert!(!emitted_flake.contains("path:"));
     let repeat = TrainFixture::resolution()
         .resolve()
         .expect("same closure resolves");

@@ -223,28 +223,20 @@ fn a_staged_consumer_cascades_its_producers_onto_the_staging_branch() {
     );
 
     // Level 2: schema-rust cascades. Its schema pin resolves to schema's
-    // *staging* tip (the ledger seeded from the pre-staged set), so the manifest
-    // redirects branch main -> main and the lock repins to the staging tip;
-    // its nota pin, resolving to nota's main tip, is untouched.
+    // *staging* tip (the ledger seeded from the pre-staged set). Because this
+    // fixture deliberately names the same branch for mainline and staging,
+    // the manifest already reaches that branch and needs no no-op rewrite;
+    // the lock still repins to the staged commit. Its nota pin stays untouched.
     let schema_rust_outcome = &levels[2].repositories()[0];
     let Action::Bumped(bump) = schema_rust_outcome.action() else {
         panic!("schema-rust must cascade: {schema_rust_outcome:?}");
     };
     let schema_name = ComponentName::new("schema");
-    let manifest_bump = bump
-        .applied()
-        .iter()
-        .find(|applied| applied.layer() == PinLayer::CargoManifest)
-        .expect("the cascade redirects schema-rust's schema manifest declaration");
-    assert_eq!(manifest_bump.dependency(), &schema_name);
-    assert_eq!(
-        manifest_bump.previous(),
-        &PinValue::Reference(BranchName::new("main"))
-    );
-    assert_eq!(
-        manifest_bump.next(),
-        &PinValue::Reference(BranchName::new("main")),
-        "the schema pin redirects to the configured staging branch, not `synchronizer`"
+    assert!(
+        bump.applied()
+            .iter()
+            .all(|applied| applied.layer() != PinLayer::CargoManifest),
+        "an already-reachable staging branch must not receive a no-op manifest edit"
     );
     let schema_lock_bump = bump
         .applied()

@@ -31,6 +31,10 @@ Entrypoint:
   one NOTA report out; exit 1 when the report carries failures.
 - `cargo run --example validate -- <configuration.nota>` — decode-only
   config check; performs no git, nix, or network operation.
+- `synchronizer release-train <configuration.nota> <release-train.nota>` —
+  resolve pushed train selectors, materialize only `train/<name>` candidates,
+  cascade per-component Cargo/flake locks, and invoke the ordinary verification
+  gate; never merges or writes mainline.
 
 ## Epic release trains
 

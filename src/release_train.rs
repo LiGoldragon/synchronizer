@@ -5,11 +5,16 @@
 //! attestations. Cargo and flake locks remain component-local projections.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use blake3::Hasher;
 use nota::{NotaDecode, NotaEncode};
 use serde::Serialize;
 
+use crate::configuration::SynchronizerConfig;
+use crate::driver::{BaseSelection, RunBoundaries, SynchronizerRun};
+use crate::git_repository::{CommitMessage, ComponentRepository};
+use crate::report::Action;
 use crate::types::{BranchName, CommitIdentifier, ComponentName, NarHash};
 
 /// A durable name for one release train.
@@ -481,6 +486,24 @@ impl ResolvedReleaseTrain {
         )
     }
 
+    /// Emit the P2 portable integration inputs. The files contain no local
+    /// source reference; the caller chooses only their output directory.
+    pub fn write_integration_artifacts(
+        &self,
+        output_directory: &Path,
+        owner: &str,
+    ) -> Result<ReleaseTrainArtifacts, ReleaseTrainError> {
+        std::fs::create_dir_all(output_directory)
+            .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
+        let json_path = output_directory.join("release-train.lock.json");
+        let flake_path = output_directory.join("flake.nix");
+        std::fs::write(&json_path, self.to_canonical_json()?)
+            .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
+        std::fs::write(&flake_path, self.to_integration_flake(owner))
+            .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
+        Ok(ReleaseTrainArtifacts::new(json_path, flake_path))
+    }
+
     fn payload_identity(&self) -> String {
         let payload = serde_json::to_vec(&ResolvedTrainIdentityPayload::from(self))
             .expect("resolved release train identity payload is serializable");
@@ -488,6 +511,31 @@ impl ResolvedReleaseTrain {
         hasher.update(b"LiGoldragon.release-train.resolved.v1\0");
         hasher.update(&payload);
         hasher.finalize().to_hex().to_string()
+    }
+}
+
+/// Paths of generated P2 artifacts; their contents remain portable closure
+/// projections and not another lock authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseTrainArtifacts {
+    json_path: PathBuf,
+    flake_path: PathBuf,
+}
+
+impl ReleaseTrainArtifacts {
+    pub fn new(json_path: PathBuf, flake_path: PathBuf) -> Self {
+        Self {
+            json_path,
+            flake_path,
+        }
+    }
+
+    pub fn json_path(&self) -> &Path {
+        &self.json_path
+    }
+
+    pub fn flake_path(&self) -> &Path {
+        &self.flake_path
     }
 }
 
@@ -511,6 +559,198 @@ impl<'a> From<&'a ResolvedReleaseTrain> for ResolvedTrainIdentityPayload<'a> {
             locks: &train.locks,
             vendor_snapshot: &train.vendor_snapshot,
         }
+    }
+}
+
+/// A live release-train operation. It resolves only pushed selectors, creates
+/// per-component `train/<name>` bootstrap commits, then reuses the ordinary
+/// typed Cargo/flake cascade against those candidate branches.
+pub struct ReleaseTrainRun {
+    config: SynchronizerConfig,
+    intent: ReleaseTrainIntent,
+    boundaries: RunBoundaries,
+}
+
+impl ReleaseTrainRun {
+    /// Construct the production release-train operation. Tests inject
+    /// `RunBoundaries` through [`Self::new`] so no fixture reaches a remote.
+    pub fn from_config(config: SynchronizerConfig, intent: ReleaseTrainIntent) -> Self {
+        let boundaries = RunBoundaries::from_config(&config);
+        Self::new(config, intent, boundaries)
+    }
+
+    pub fn new(
+        config: SynchronizerConfig,
+        intent: ReleaseTrainIntent,
+        boundaries: RunBoundaries,
+    ) -> Self {
+        Self {
+            config,
+            intent,
+            boundaries,
+        }
+    }
+
+    /// Resolve selectors, prove expected bases, and materialize isolated train
+    /// branches before cascading ordinary per-consumer Cargo/flake lock edits.
+    pub fn execute(self) -> Result<MaterializedReleaseTrain, ReleaseTrainError> {
+        let candidate_branch = self.intent.name().candidate_branch();
+        let component_names = self
+            .intent
+            .components()
+            .iter()
+            .map(|component| component.component().clone())
+            .collect::<Vec<_>>();
+        let mut selectors = Vec::new();
+        for component in self.intent.components() {
+            let selected = self.resolve_selector(component)?;
+            let candidate = self.materialize_candidate(component, &selected, &candidate_branch)?;
+            selectors.push(ResolvedSelector::new(
+                component.component().clone(),
+                selected,
+                component.expected_base().clone(),
+                candidate,
+            ));
+        }
+        let train_config = self
+            .config
+            .release_train_view(&component_names, candidate_branch.clone())
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        let report = SynchronizerRun::with_boundaries(train_config, self.boundaries)
+            .with_base_selection(BaseSelection::StagedCascade)
+            .execute()
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        for level in report.levels() {
+            for outcome in level.repositories() {
+                if let Action::Bumped(bump) = outcome.action()
+                    && let Some(selector) = selectors
+                        .iter_mut()
+                        .find(|selector| selector.component() == outcome.component())
+                {
+                    selector.candidate = bump.pushed().tip().clone();
+                }
+            }
+        }
+        Ok(MaterializedReleaseTrain {
+            intent: self.intent,
+            candidate_branch,
+            selectors,
+            report,
+        })
+    }
+
+    fn resolve_selector(
+        &self,
+        component: &TrainComponent,
+    ) -> Result<CommitIdentifier, ReleaseTrainError> {
+        let repository = self.open_component(component.component())?;
+        let selected = match component.selector() {
+            CandidateSelector::Mainline => repository
+                .remote_main_tip()
+                .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?,
+            CandidateSelector::Branch(branch) => repository
+                .remote_branch_tip(branch)
+                .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?
+                .ok_or_else(|| ReleaseTrainError::MissingSelectedBranch {
+                    component: component.component().clone(),
+                    branch: branch.clone(),
+                })?,
+            CandidateSelector::ExactCommit(commit) => commit.clone(),
+        };
+        repository
+            .fetch(&selected)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        let base_matches = repository
+            .base_is_ancestor(component.expected_base(), &selected)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        if !base_matches {
+            return Err(ReleaseTrainError::ExpectedBaseMoved {
+                component: component.component().clone(),
+                expected: component.expected_base().clone(),
+                observed: selected,
+            });
+        }
+        Ok(selected)
+    }
+
+    fn materialize_candidate(
+        &self,
+        component: &TrainComponent,
+        selected: &CommitIdentifier,
+        candidate_branch: &BranchName,
+    ) -> Result<CommitIdentifier, ReleaseTrainError> {
+        let repository = self.open_component(component.component())?;
+        let message = CommitMessage::new(format!(
+            "synchronizer: materialize release train {}",
+            self.intent.name().as_str()
+        ));
+        let candidate = repository
+            .commit_file_edits(selected, &[], &message)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        repository
+            .push_train_branch(candidate_branch, &candidate)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        Ok(candidate)
+    }
+
+    fn open_component(
+        &self,
+        component: &ComponentName,
+    ) -> Result<Box<dyn ComponentRepository>, ReleaseTrainError> {
+        let clone_path = self
+            .config
+            .checkout_path(component)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        let remote_url = self
+            .config
+            .repository_url(component)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        self.boundaries
+            .repository_opener
+            .open(component, clone_path, remote_url)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))
+    }
+}
+
+/// Candidate commits plus the ordinary cascade report. The caller records
+/// real narHash and component lock evidence before emitting the immutable
+/// closure; no universal lock is synthesized.
+pub struct MaterializedReleaseTrain {
+    intent: ReleaseTrainIntent,
+    candidate_branch: BranchName,
+    selectors: Vec<ResolvedSelector>,
+    report: crate::report::SynchronizerReport,
+}
+
+impl MaterializedReleaseTrain {
+    pub fn candidate_branch(&self) -> &BranchName {
+        &self.candidate_branch
+    }
+
+    pub fn selectors(&self) -> &[ResolvedSelector] {
+        &self.selectors
+    }
+
+    pub fn report(&self) -> &crate::report::SynchronizerReport {
+        &self.report
+    }
+
+    pub fn resolve_closure(
+        &self,
+        attestations: Vec<NixSourceAttestation>,
+        locks: Vec<ComponentLockIdentity>,
+        discovered_internal_components: BTreeSet<ComponentName>,
+        discovered_external_components: BTreeMap<ComponentName, CommitIdentifier>,
+    ) -> Result<ResolvedReleaseTrain, ReleaseTrainError> {
+        ReleaseTrainResolution::new(
+            self.intent.clone(),
+            self.selectors.clone(),
+            attestations,
+            locks,
+            discovered_internal_components,
+            discovered_external_components,
+        )
+        .resolve()
     }
 }
 
@@ -543,6 +783,12 @@ pub enum ReleaseTrainError {
     },
     Json(String),
     Nota(String),
+    MissingSelectedBranch {
+        component: ComponentName,
+        branch: BranchName,
+    },
+    Infrastructure(String),
+    Io(String),
 }
 
 impl std::fmt::Display for ReleaseTrainError {
@@ -612,6 +858,16 @@ impl std::fmt::Display for ReleaseTrainError {
                 formatter,
                 "release-train intent NOTA decode failed: {detail}"
             ),
+            Self::MissingSelectedBranch { component, branch } => write!(
+                formatter,
+                "selected branch {} is absent for {}",
+                branch.as_str(),
+                component.as_str()
+            ),
+            Self::Infrastructure(detail) => {
+                write!(formatter, "release-train infrastructure: {detail}")
+            }
+            Self::Io(detail) => write!(formatter, "release-train artifact IO: {detail}"),
         }
     }
 }

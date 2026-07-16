@@ -13,8 +13,8 @@ use fixtures::{
 use synchronizer::configuration::{Component, ComponentCheckout};
 use synchronizer::driver::{RunBoundaries, SynchronizerRun};
 use synchronizer::release_train::{
-    CandidateSelector, ComponentLockIdentity, NixSourceAttestation, ReleaseTrainError,
-    ReleaseTrainIntent, ReleaseTrainName, TrainComponent,
+    CandidateSelector, ComponentLockIdentity, ImmutableExternal, NixSourceAttestation,
+    ReleaseTrainError, ReleaseTrainIntent, ReleaseTrainName, TrainComponent,
 };
 use synchronizer::types::{BranchName, BuilderHost, ComponentName, NarHash};
 
@@ -269,5 +269,133 @@ fn normal_train_rejects_an_owned_dependency_omitted_from_the_intent() {
         result,
         Err(ReleaseTrainError::UndeclaredInternalEdge(component))
             if component == ComponentName::new("unplanned")
+    ));
+}
+
+fn immutable_external_run(
+    externals: Vec<ImmutableExternal>,
+    lock_sources: &[(&str, synchronizer::types::CommitIdentifier)],
+) -> Result<synchronizer::release_train::MaterializedReleaseTrain, ReleaseTrainError> {
+    let lock_entries = lock_sources
+        .iter()
+        .map(|(name, commit)| format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"git+https://github.com/LiGoldragon/{name}.git?branch=main#{}\"\n",
+            commit.as_str()
+        ))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let manifest_dependencies = lock_sources
+        .iter()
+        .map(|(name, _)| {
+            format!(
+                "{name} = {{ git = \"https://github.com/LiGoldragon/{name}.git\", branch = \"main\" }}\n"
+            )
+        })
+        .collect::<String>();
+    let consumer = Rc::new(FixtureRepository::new(
+        "consumer",
+        revision("consumer-main"),
+        BTreeMap::from([
+            (
+                "Cargo.toml".to_string(),
+                format!(
+                    "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n\n[dependencies]\n{manifest_dependencies}"
+                ),
+            ),
+            (
+                "Cargo.lock".to_string(),
+                format!("version = 4\n\n{lock_entries}"),
+            ),
+        ]),
+    ));
+    SynchronizerRun::release_train(
+        standard_config(vec![Component::new(
+            ComponentName::new("consumer"),
+            ComponentCheckout::AtRoot,
+        )]),
+        ReleaseTrainIntent::new(
+            ReleaseTrainName::new("immutable-external-proof"),
+            vec![TrainComponent::new(
+                ComponentName::new("consumer"),
+                CandidateSelector::Mainline,
+                revision("consumer-main"),
+            )],
+            externals,
+        ),
+        RunBoundaries {
+            repository_opener: Box::new(FixtureOpener {
+                repositories: BTreeMap::from([(ComponentName::new("consumer"), consumer)]),
+            }),
+            nar_hash_source: Box::new(FixturePrefetch),
+            builder_host_resolver: Box::new(FixtureBuilderHost {
+                host: BuilderHost::new("prometheus"),
+            }),
+            verifier_source: Box::new(FixtureVerifierSource {
+                verified: Rc::new(RefCell::new(Vec::new())),
+            }),
+            lock_resolver: Box::new(UnreachableLockResolver {
+                witness: "the fixture has no declared train producer",
+            }),
+        },
+    )
+    .execute()
+}
+
+#[test]
+fn normal_train_accepts_an_exactly_admitted_owned_locked_external() {
+    let commit = revision("external-main");
+    let materialized = immutable_external_run(
+        vec![ImmutableExternal::new(
+            ComponentName::new("external"),
+            commit.clone(),
+        )],
+        &[("external", commit.clone())],
+    )
+    .expect("an exact admission moves the owned lock source outside the train");
+    let closure = materialized.closure();
+    assert_eq!(closure.components().len(), 1);
+}
+
+#[test]
+fn normal_train_rejects_an_owned_locked_external_when_its_commit_differs() {
+    let result = immutable_external_run(
+        vec![ImmutableExternal::new(
+            ComponentName::new("external"),
+            revision("different-external"),
+        )],
+        &[("external", revision("external-main"))],
+    );
+    assert!(matches!(
+        result,
+        Err(ReleaseTrainError::UndeclaredInternalEdge(component))
+            if component == ComponentName::new("external")
+    ));
+}
+
+#[test]
+fn normal_train_rejects_an_owned_locked_external_without_admission() {
+    let result = immutable_external_run(Vec::new(), &[("external", revision("external-main"))]);
+    assert!(matches!(
+        result,
+        Err(ReleaseTrainError::UndeclaredInternalEdge(component))
+            if component == ComponentName::new("external")
+    ));
+}
+
+#[test]
+fn normal_train_requires_exact_admission_for_every_recursive_owned_lock_source() {
+    let outer = revision("outer-main");
+    let inner = revision("inner-main");
+    let result = immutable_external_run(
+        vec![ImmutableExternal::new(
+            ComponentName::new("outer"),
+            outer.clone(),
+        )],
+        &[("outer", outer), ("inner", inner)],
+    );
+    assert!(matches!(
+        result,
+        Err(ReleaseTrainError::UndeclaredInternalEdge(component))
+            if component == ComponentName::new("inner")
     ));
 }

@@ -15,7 +15,7 @@ use crate::component_manifests::ComponentManifests;
 use crate::configuration::SynchronizerConfig;
 use crate::error::Error;
 use crate::flake_lock::InputName;
-use crate::types::ComponentName;
+use crate::types::{CommitIdentifier, ComponentName};
 
 /// Which pin surface an edge was discovered in (and therefore where its
 /// bump must be written).
@@ -196,32 +196,38 @@ impl DependencyGraph {
         &self.edges
     }
 
-    /// Every owned repository identity observed in selected train manifests,
-    /// including one that was omitted from the operational configuration.
-    /// Release-train membership validates this set before candidates become a
-    /// closure, so authored membership can never hide an internal edge.
-    pub fn owned_component_identities(
+    /// Classify every owned selected-manifest dependency for a release train.
+    /// A source can leave the train only when its exact resolved lock commit is
+    /// explicitly admitted. Manifest-only identities remain internal because
+    /// they do not supply the immutable commit an external admission requires.
+    pub fn release_train_topology(
         owner: &str,
+        admitted_externals: &BTreeMap<ComponentName, Vec<CommitIdentifier>>,
         manifests: &[ComponentManifests],
-    ) -> Result<BTreeSet<ComponentName>, Error> {
-        let mut identities = manifests
+    ) -> Result<ReleaseTrainTopology, Error> {
+        let mut internal = manifests
             .iter()
             .map(|manifest| manifest.component().clone())
             .collect::<BTreeSet<_>>();
+        let mut manifest_identities = BTreeSet::new();
+        let mut locked_identities: BTreeMap<ComponentName, Vec<CommitIdentifier>> = BTreeMap::new();
         for manifest in manifests {
             if let Some(cargo) = manifest.cargo() {
                 for (_, source) in cargo.manifest().git_dependencies() {
                     if let Ok(identity) = source.url().repository_identity()
                         && identity.owner == owner
                     {
-                        identities.insert(identity.repository);
+                        manifest_identities.insert(identity.repository);
                     }
                 }
                 for (_, pin) in cargo.lock().git_packages()? {
                     if let Ok(identity) = pin.url().repository_identity()
                         && identity.owner == owner
                     {
-                        identities.insert(identity.repository);
+                        let commits = locked_identities.entry(identity.repository).or_default();
+                        if !commits.contains(pin.revision()) {
+                            commits.push(pin.revision().clone());
+                        }
                     }
                 }
             }
@@ -230,19 +236,43 @@ impl DependencyGraph {
                     if let Some((input_owner, repository)) = occurrence.url().github_identity()
                         && input_owner == owner
                     {
-                        identities.insert(repository.clone());
+                        manifest_identities.insert(repository.clone());
                     }
                 }
                 for (_, locked) in flake.lock().github_inputs() {
                     if locked.owner() == Some(owner)
-                        && let Some(repository) = locked.component_name()
+                        && let (Some(repository), Some(revision)) =
+                            (locked.component_name(), locked.revision())
                     {
-                        identities.insert(repository);
+                        let commits = locked_identities.entry(repository).or_default();
+                        if !commits.contains(&revision) {
+                            commits.push(revision);
+                        }
                     }
                 }
             }
         }
-        Ok(identities)
+        let mut externals = BTreeMap::new();
+        for (component, commits) in &locked_identities {
+            let admitted = admitted_externals.get(component);
+            if commits.len() == 1
+                && let Some(commit) = commits.first()
+                && admitted.is_some_and(|admitted| admitted.contains(commit))
+            {
+                externals.insert(component.clone(), commit.clone());
+            } else {
+                internal.insert(component.clone());
+            }
+        }
+        for component in manifest_identities {
+            if !externals.contains_key(&component) {
+                internal.insert(component);
+            }
+        }
+        Ok(ReleaseTrainTopology {
+            internal,
+            externals,
+        })
     }
 
     /// All edges whose consumer is `consumer`.
@@ -307,6 +337,25 @@ impl DependencyGraph {
             levels.push(level.into_iter().cloned().collect());
         }
         Ok(TopologicalLevels(levels))
+    }
+}
+
+/// The strict owned-source classification consumed by release-train closure
+/// validation. Internal sources must be declared train members; external
+/// sources carry the exact admitted locked commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseTrainTopology {
+    internal: BTreeSet<ComponentName>,
+    externals: BTreeMap<ComponentName, CommitIdentifier>,
+}
+
+impl ReleaseTrainTopology {
+    pub fn internal(&self) -> &BTreeSet<ComponentName> {
+        &self.internal
+    }
+
+    pub fn externals(&self) -> &BTreeMap<ComponentName, CommitIdentifier> {
+        &self.externals
     }
 }
 

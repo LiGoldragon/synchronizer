@@ -136,6 +136,23 @@ fn authored_language_family_intent_shape_is_an_independent_nota_document() {
 }
 
 #[test]
+fn authored_immutable_external_keeps_its_exact_component_and_commit() {
+    let intent = ReleaseTrainIntent::from_nota_text(
+        "(external-proof [(consumer Mainline aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)] [(external bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)])",
+    )
+    .expect("external intent decodes");
+    assert_eq!(intent.immutable_externals().len(), 1);
+    assert_eq!(
+        intent.immutable_externals()[0].component().as_str(),
+        "external"
+    );
+    assert_eq!(
+        intent.immutable_externals()[0].commit(),
+        &CommitIdentifier::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+}
+
+#[test]
 fn release_train_closure_is_canonical_and_contains_only_immutable_nix_sources() {
     let closure = TrainFixture::resolution()
         .resolve()

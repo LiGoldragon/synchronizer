@@ -799,8 +799,19 @@ impl ReleaseTrainRun {
         // even when its producer was omitted from configuration.
         DependencyGraph::discover(&self.config, &manifests)
             .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
-        let discovered = DependencyGraph::owned_component_identities(
+        let admitted_externals = self.intent.immutable_externals().iter().fold(
+            BTreeMap::new(),
+            |mut admitted, external| {
+                admitted
+                    .entry(external.component().clone())
+                    .or_insert_with(Vec::new)
+                    .push(external.commit().clone());
+                admitted
+            },
+        );
+        let discovered = DependencyGraph::release_train_topology(
             self.config.forge().owner().as_str(),
+            &admitted_externals,
             &manifests,
         )
         .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
@@ -809,8 +820,8 @@ impl ReleaseTrainRun {
             selectors.to_vec(),
             attestations,
             locks,
-            discovered,
-            BTreeMap::new(),
+            discovered.internal().clone(),
+            discovered.externals().clone(),
         )
         .resolve()
     }

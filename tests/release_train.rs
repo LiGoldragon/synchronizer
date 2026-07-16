@@ -138,19 +138,27 @@ fn authored_language_family_intent_shape_is_an_independent_nota_document() {
 #[test]
 fn owner_fix_fixture_carries_the_held_members_and_full_external_classification() {
     let intent = ReleaseTrainIntent::from_nota_text(
-        "(language-family-owner-fix [(nota (ExactCommit 18e2e8d0dba37e9e84045af3608585b51f6e3b36) f8de7a516b769fc544c7f8c0030e258833c1cf9b) (schema-language (ExactCommit 41a7b257dddbcaebf151a053c6fd43324a2a8e39) 59d59aca5767523a929e5bd6fcd011a4a4e8ff23) (schema-rust (ExactCommit a92a9d0e2940b4debed74a2f7d06ea44c4360c99) 87de872dbc4ee124a6a1133ff520b594063304f5)] [(rust-build d97af86e37c8f53d5d1c71b6002d426e90814f8b) (kameo f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01) (sema 51d7927c872f0df12791bad8d39a4db6433b01a1) (sema-engine fa3a822ff6e2451fb86f02c5d1653e79affa20c6) (signal-frame fd7909d1497b7bb18751521387a1087cd9e7c91c) (signal-sema 8d4a0223efe59b36ac79d154d15961084eef286b) (triad-runtime d323f9024f8490961c687798cf2dad4aea54aa7e)])",
+        "(language-family-owner-fix [(schema-rust (ExactCommit a92a9d0e2940b4debed74a2f7d06ea44c4360c99) 87de872dbc4ee124a6a1133ff520b594063304f5)] [(nota 18e2e8d0dba37e9e84045af3608585b51f6e3b36) (schema-language 41a7b257dddbcaebf151a053c6fd43324a2a8e39) (rust-build d97af86e37c8f53d5d1c71b6002d426e90814f8b) (kameo f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01) (sema 51d7927c872f0df12791bad8d39a4db6433b01a1) (sema-engine fa3a822ff6e2451fb86f02c5d1653e79affa20c6) (signal-frame fd7909d1497b7bb18751521387a1087cd9e7c91c) (signal-sema 8d4a0223efe59b36ac79d154d15961084eef286b) (triad-runtime d323f9024f8490961c687798cf2dad4aea54aa7e)])",
     )
     .expect("owner-fix fixture shape decodes");
-    assert_eq!(intent.components().len(), 3);
-    assert_eq!(intent.components()[0].component().as_str(), "nota");
+    assert_eq!(intent.components().len(), 1);
+    assert_eq!(intent.components()[0].component().as_str(), "schema-rust");
     assert!(matches!(
-        intent.components()[1].selector(),
+        intent.components()[0].selector(),
         CandidateSelector::ExactCommit(_)
     ));
-    assert!(matches!(
-        intent.components()[2].selector(),
-        CandidateSelector::ExactCommit(_)
-    ));
+    assert!(
+        intent
+            .immutable_externals()
+            .iter()
+            .any(|external| external.component().as_str() == "nota")
+    );
+    assert!(
+        intent
+            .immutable_externals()
+            .iter()
+            .any(|external| external.component().as_str() == "schema-language")
+    );
     assert!(
         intent
             .immutable_externals()

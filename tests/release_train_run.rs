@@ -385,8 +385,13 @@ fn normal_train_rejects_an_owned_locked_external_when_its_commit_differs() {
     );
     assert!(matches!(
         result,
-        Err(ReleaseTrainError::UndeclaredInternalEdge(component))
-            if component == ComponentName::new("external")
+        Err(ReleaseTrainError::ImmutableExternalAdmissionMismatch {
+            component,
+            observed,
+            admitted,
+        }) if component == ComponentName::new("external")
+            && observed == vec![revision("external-main")]
+            && admitted == vec![revision("different-external")]
     ));
 }
 

@@ -253,6 +253,7 @@ impl DependencyGraph {
             }
         }
         let mut externals = BTreeMap::new();
+        let mut admission_mismatches = Vec::new();
         for (component, commits) in &locked_identities {
             let admitted = admitted_externals.get(component);
             if commits.len() == 1
@@ -261,6 +262,13 @@ impl DependencyGraph {
             {
                 externals.insert(component.clone(), commit.clone());
             } else {
+                if let Some(admitted) = admitted {
+                    admission_mismatches.push(ImmutableExternalAdmissionMismatch::new(
+                        component.clone(),
+                        commits.clone(),
+                        admitted.clone(),
+                    ));
+                }
                 internal.insert(component.clone());
             }
         }
@@ -272,6 +280,7 @@ impl DependencyGraph {
         Ok(ReleaseTrainTopology {
             internal,
             externals,
+            admission_mismatches,
         })
     }
 
@@ -347,6 +356,42 @@ impl DependencyGraph {
 pub struct ReleaseTrainTopology {
     internal: BTreeSet<ComponentName>,
     externals: BTreeMap<ComponentName, CommitIdentifier>,
+    admission_mismatches: Vec<ImmutableExternalAdmissionMismatch>,
+}
+
+/// Typed evidence that an authored ImmutableExternal named a repository but
+/// did not admit the exact lock commit observed in selected candidate truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImmutableExternalAdmissionMismatch {
+    component: ComponentName,
+    observed: Vec<CommitIdentifier>,
+    admitted: Vec<CommitIdentifier>,
+}
+
+impl ImmutableExternalAdmissionMismatch {
+    pub fn new(
+        component: ComponentName,
+        observed: Vec<CommitIdentifier>,
+        admitted: Vec<CommitIdentifier>,
+    ) -> Self {
+        Self {
+            component,
+            observed,
+            admitted,
+        }
+    }
+
+    pub fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
+    pub fn observed(&self) -> &[CommitIdentifier] {
+        &self.observed
+    }
+
+    pub fn admitted(&self) -> &[CommitIdentifier] {
+        &self.admitted
+    }
 }
 
 impl ReleaseTrainTopology {
@@ -356,6 +401,10 @@ impl ReleaseTrainTopology {
 
     pub fn externals(&self) -> &BTreeMap<ComponentName, CommitIdentifier> {
         &self.externals
+    }
+
+    pub fn admission_mismatches(&self) -> &[ImmutableExternalAdmissionMismatch] {
+        &self.admission_mismatches
     }
 }
 

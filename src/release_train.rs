@@ -815,6 +815,13 @@ impl ReleaseTrainRun {
             &manifests,
         )
         .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        if let Some(mismatch) = discovered.admission_mismatches().first() {
+            return Err(ReleaseTrainError::ImmutableExternalAdmissionMismatch {
+                component: mismatch.component().clone(),
+                observed: mismatch.observed().to_vec(),
+                admitted: mismatch.admitted().to_vec(),
+            });
+        }
         ReleaseTrainResolution::new(
             self.intent.clone(),
             selectors.to_vec(),
@@ -928,6 +935,11 @@ impl MaterializedReleaseTrain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseTrainError {
     UndeclaredInternalEdge(ComponentName),
+    ImmutableExternalAdmissionMismatch {
+        component: ComponentName,
+        observed: Vec<CommitIdentifier>,
+        admitted: Vec<CommitIdentifier>,
+    },
     MissingDeclaredComponent(ComponentName),
     UnadmittedExternal {
         component: ComponentName,
@@ -966,6 +978,11 @@ impl std::fmt::Display for ReleaseTrainError {
             Self::UndeclaredInternalEdge(component) => write!(
                 formatter,
                 "undeclared internal component edge: {}",
+                component.as_str()
+            ),
+            Self::ImmutableExternalAdmissionMismatch { component, .. } => write!(
+                formatter,
+                "immutable external admission mismatch: {}",
                 component.as_str()
             ),
             Self::MissingDeclaredComponent(component) => write!(

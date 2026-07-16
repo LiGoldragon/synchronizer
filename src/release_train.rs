@@ -798,11 +798,8 @@ impl ReleaseTrainRun {
                 .with_last_modified(prefetched.last_modified()),
             );
         }
-        // Run the ordinary configured discovery as well as the release-train
-        // owned-identity scan.  The latter deliberately retains an owned edge
-        // even when its producer was omitted from configuration.
-        DependencyGraph::discover(&self.config, &manifests)
-            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        // The release-train owned-source scan is closure authority; it retains
+        // an owned edge even when its producer was omitted from configuration.
         let admitted_externals = self.intent.immutable_externals().iter().fold(
             BTreeMap::new(),
             |mut admitted, external| {

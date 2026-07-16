@@ -406,6 +406,76 @@ fn normal_train_rejects_an_owned_locked_external_without_admission() {
 }
 
 #[test]
+fn every_candidate_member_must_lock_an_external_at_the_one_admitted_commit() {
+    let admitted = revision("nota-admitted");
+    let stale = revision("nota-stale");
+    let files = |commit: &synchronizer::types::CommitIdentifier| {
+        BTreeMap::from([
+        ("Cargo.toml".to_string(), "[package]\nname = \"member\"\nversion = \"0.1.0\"\n\n[dependencies]\nnota = { git = \"https://github.com/LiGoldragon/nota.git\", branch = \"main\" }\n".to_string()),
+        ("Cargo.lock".to_string(), format!("version = 4\n\n[[package]]\nname = \"nota\"\nversion = \"0.1.0\"\nsource = \"git+https://github.com/LiGoldragon/nota.git?branch=main#{}\"\n", commit.as_str())),
+    ])
+    };
+    let producer = Rc::new(FixtureRepository::new(
+        "producer",
+        revision("producer-main"),
+        files(&admitted),
+    ));
+    let consumer = Rc::new(FixtureRepository::new(
+        "consumer",
+        revision("consumer-main"),
+        files(&stale),
+    ));
+    let result = SynchronizerRun::release_train(
+        standard_config(vec![
+            Component::new(ComponentName::new("producer"), ComponentCheckout::AtRoot),
+            Component::new(ComponentName::new("consumer"), ComponentCheckout::AtRoot),
+        ]),
+        ReleaseTrainIntent::new(
+            ReleaseTrainName::new("two-member-external-proof"),
+            vec![
+                TrainComponent::new(
+                    ComponentName::new("producer"),
+                    CandidateSelector::Mainline,
+                    revision("producer-main"),
+                ),
+                TrainComponent::new(
+                    ComponentName::new("consumer"),
+                    CandidateSelector::Mainline,
+                    revision("consumer-main"),
+                ),
+            ],
+            vec![ImmutableExternal::new(
+                ComponentName::new("nota"),
+                admitted.clone(),
+            )],
+        ),
+        RunBoundaries {
+            repository_opener: Box::new(FixtureOpener {
+                repositories: BTreeMap::from([
+                    (ComponentName::new("producer"), producer),
+                    (ComponentName::new("consumer"), consumer),
+                ]),
+            }),
+            nar_hash_source: Box::new(FixturePrefetch),
+            builder_host_resolver: Box::new(FixtureBuilderHost {
+                host: BuilderHost::new("prometheus"),
+            }),
+            verifier_source: Box::new(FixtureVerifierSource {
+                verified: Rc::new(RefCell::new(Vec::new())),
+            }),
+            lock_resolver: Box::new(UnreachableLockResolver {
+                witness: "no configured producer pins",
+            }),
+        },
+    )
+    .execute();
+    assert!(
+        matches!(result, Err(ReleaseTrainError::ImmutableExternalAdmissionMismatch { component, observed, admitted: expected })
+        if component == ComponentName::new("nota") && observed.len() == 2 && expected == vec![admitted])
+    );
+}
+
+#[test]
 fn normal_train_requires_exact_admission_for_every_recursive_owned_lock_source() {
     let outer = revision("outer-main");
     let inner = revision("inner-main");

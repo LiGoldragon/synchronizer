@@ -1,0 +1,58 @@
+{
+  "nodes": {
+    "nota": {
+      "locked": {
+        "lastModified": 1784202063,
+        "narHash": "sha256-XkLS5A6Ka0ZBPyz8EDhqDOuxwOmrEoBajW/Ph8L/8zg=",
+        "owner": "LiGoldragon",
+        "repo": "nota",
+        "rev": "ad5c3a707cbd012708a979febb15822c922a060b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "nota",
+        "type": "github"
+      }
+    },
+    "schema_language": {
+      "locked": {
+        "lastModified": 1784202069,
+        "narHash": "sha256-HAAgkC8lTDthbh9G2yhRNHlmKQo6eq27htv7Q9RBhkc=",
+        "owner": "LiGoldragon",
+        "repo": "schema-language",
+        "rev": "32e710032b2b78ce26cebf898efba815f82a3cc0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "schema-language",
+        "type": "github"
+      }
+    },
+    "schema_rust": {
+      "locked": {
+        "lastModified": 1784202075,
+        "narHash": "sha256-L5LaQr8JAFjZRRacm/L5PAlXzhQrCTNnc943i2G+VrI=",
+        "owner": "LiGoldragon",
+        "repo": "schema-rust",
+        "rev": "33065a00f40dcdc36398bb7eaa370e9f7c91401f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "schema-rust",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nota": "nota",
+        "schema_language": "schema_language",
+        "schema_rust": "schema_rust"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

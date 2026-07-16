@@ -143,7 +143,12 @@ impl ComponentRepository for FixtureRepository {
     }
 
     fn remote_staging_tip(&self) -> Result<Option<CommitIdentifier>, Error> {
-        Ok(self.staging_tip.clone())
+        Ok(self
+            .pushed
+            .borrow()
+            .last()
+            .cloned()
+            .or_else(|| self.staging_tip.clone()))
     }
 
     fn fetch(&self, _revision: &CommitIdentifier) -> Result<(), Error> {
@@ -151,7 +156,12 @@ impl ComponentRepository for FixtureRepository {
     }
 
     fn remote_branch_tip(&self, _branch: &BranchName) -> Result<Option<CommitIdentifier>, Error> {
-        Ok(self.staging_tip.clone())
+        Ok(self
+            .pushed
+            .borrow()
+            .last()
+            .cloned()
+            .or_else(|| self.staging_tip.clone()))
     }
 
     fn base_is_ancestor(

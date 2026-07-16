@@ -680,7 +680,11 @@ impl ReleaseTrainRun {
                         .iter_mut()
                         .find(|selector| selector.component() == outcome.component())
                 {
-                    selector.candidate = bump.pushed().tip().clone();
+                    selector.candidate = self.pushed_candidate_tip(
+                        selector.component(),
+                        &candidate_branch,
+                        bump.pushed().tip(),
+                    )?;
                 }
             }
         }
@@ -850,7 +854,48 @@ impl ReleaseTrainRun {
         repository
             .push_train_branch(candidate_branch, &candidate)
             .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
-        Ok(candidate)
+        let observed = repository
+            .remote_branch_tip(candidate_branch)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?
+            .ok_or_else(|| ReleaseTrainError::MissingSelectedBranch {
+                component: component.component().clone(),
+                branch: candidate_branch.clone(),
+            })?;
+        if observed != candidate {
+            return Err(ReleaseTrainError::CandidatePushMismatch {
+                component: component.component().clone(),
+                expected: candidate,
+                observed,
+            });
+        }
+        Ok(observed)
+    }
+
+    /// Read back the remote train ref after a cascade push. The closure must
+    /// consume this immutable forge observation, never the local object id a
+    /// report happened to record before transport completed.
+    fn pushed_candidate_tip(
+        &self,
+        component: &ComponentName,
+        branch: &BranchName,
+        expected: &CommitIdentifier,
+    ) -> Result<CommitIdentifier, ReleaseTrainError> {
+        let repository = self.open_component(component)?;
+        let observed = repository
+            .remote_branch_tip(branch)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?
+            .ok_or_else(|| ReleaseTrainError::MissingSelectedBranch {
+                component: component.clone(),
+                branch: branch.clone(),
+            })?;
+        if &observed != expected {
+            return Err(ReleaseTrainError::CandidatePushMismatch {
+                component: component.clone(),
+                expected: expected.clone(),
+                observed,
+            });
+        }
+        Ok(observed)
     }
 
     fn open_component(
@@ -940,6 +985,11 @@ pub enum ReleaseTrainError {
         observed: Vec<CommitIdentifier>,
         admitted: Vec<CommitIdentifier>,
     },
+    CandidatePushMismatch {
+        component: ComponentName,
+        expected: CommitIdentifier,
+        observed: CommitIdentifier,
+    },
     MissingDeclaredComponent(ComponentName),
     UnadmittedExternal {
         component: ComponentName,
@@ -983,6 +1033,11 @@ impl std::fmt::Display for ReleaseTrainError {
             Self::ImmutableExternalAdmissionMismatch { component, .. } => write!(
                 formatter,
                 "immutable external admission mismatch: {}",
+                component.as_str()
+            ),
+            Self::CandidatePushMismatch { component, .. } => write!(
+                formatter,
+                "candidate push did not resolve to the committed train ref: {}",
                 component.as_str()
             ),
             Self::MissingDeclaredComponent(component) => write!(

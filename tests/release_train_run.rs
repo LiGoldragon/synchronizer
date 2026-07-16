@@ -3,7 +3,7 @@
 mod fixtures;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use fixtures::{
@@ -286,7 +286,10 @@ fn immutable_external_run(
         .join("\n");
     let manifest_dependencies = lock_sources
         .iter()
-        .map(|(name, _)| {
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|name| {
             format!(
                 "{name} = {{ git = \"https://github.com/LiGoldragon/{name}.git\", branch = \"main\" }}\n"
             )
@@ -354,6 +357,21 @@ fn normal_train_accepts_an_exactly_admitted_owned_locked_external() {
     .expect("an exact admission moves the owned lock source outside the train");
     let closure = materialized.closure();
     assert_eq!(closure.components().len(), 1);
+}
+
+#[test]
+fn normal_train_admits_duplicate_packages_at_one_exact_owned_repository_commit() {
+    let commit =
+        synchronizer::types::CommitIdentifier::new("f8de7a516b769fc544c7f8c0030e258833c1cf9b");
+    let materialized = immutable_external_run(
+        vec![ImmutableExternal::new(
+            ComponentName::new("nota"),
+            commit.clone(),
+        )],
+        &[("nota", commit.clone()), ("nota", commit)],
+    )
+    .expect("two packages at one exact repository commit remain one admitted external");
+    assert_eq!(materialized.closure().components().len(), 1);
 }
 
 #[test]

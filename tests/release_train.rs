@@ -151,8 +151,16 @@ fn release_train_closure_is_canonical_and_contains_only_immutable_nix_sources() 
     );
     assert!(json.contains("schema-language"));
     let flake = closure.to_integration_flake("LiGoldragon");
-    assert!(flake.contains("github:LiGoldragon/nota/1111111111111111111111111111111111111111"));
-    assert!(flake.contains("narHash = \"sha256-nota\""));
+    assert!(flake.contains("nota.url = \"github:LiGoldragon/nota/"));
+    assert!(flake.contains("perSystem = builtins.listToAttrs"));
+    assert!(
+        !flake.contains("builtins.currentSystem"),
+        "pure flake evaluation cannot depend on currentSystem: {flake}"
+    );
+    assert!(
+        !flake.contains("narHash"),
+        "narHash belongs in flake.lock, never in flake input declarations: {flake}"
+    );
     assert!(
         !flake.contains("path:"),
         "integration flake must be portable: {flake}"
@@ -163,8 +171,11 @@ fn release_train_closure_is_canonical_and_contains_only_immutable_nix_sources() 
         .expect("P2 artifacts emit");
     let emitted_json = std::fs::read_to_string(artifacts.json_path()).expect("generated JSON");
     let emitted_flake = std::fs::read_to_string(artifacts.flake_path()).expect("generated flake");
+    let emitted_flake_lock =
+        std::fs::read_to_string(artifacts.flake_lock_path()).expect("generated flake lock");
     assert_eq!(emitted_json, json);
     assert_eq!(emitted_flake, flake);
+    assert!(emitted_flake_lock.contains("\"narHash\": \"sha256-nota\""));
     assert!(!emitted_flake.contains("path:"));
     let repeat = TrainFixture::resolution()
         .resolve()

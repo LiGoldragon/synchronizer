@@ -87,13 +87,25 @@ impl CommandLine {
                 return ExitCode::from(2);
             }
         };
-        let materialized = match ReleaseTrainRun::from_config(config, intent).execute() {
+        let materialized = match ReleaseTrainRun::from_config(config.clone(), intent).execute() {
             Ok(materialized) => materialized,
             Err(error) => {
                 eprintln!("synchronizer: {error}");
                 return ExitCode::from(2);
             }
         };
+        let artifact_directory = PathBuf::from(intent_path).with_extension("");
+        if let Err(error) = materialized
+            .write_integration_artifacts(&artifact_directory, config.forge().owner().as_str())
+        {
+            eprintln!("synchronizer: release-train artifact emission: {error}");
+            return ExitCode::from(2);
+        }
+        eprintln!(
+            "synchronizer: generated release-train closure {} in {}",
+            materialized.closure().identity(),
+            artifact_directory.display(),
+        );
         self.render_report(materialized.report().clone())
     }
 

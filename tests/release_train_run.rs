@@ -13,8 +13,8 @@ use fixtures::{
 use synchronizer::configuration::{Component, ComponentCheckout};
 use synchronizer::driver::{RunBoundaries, SynchronizerRun};
 use synchronizer::release_train::{
-    CandidateSelector, ComponentLockIdentity, NixSourceAttestation, ReleaseTrainIntent,
-    ReleaseTrainName, TrainComponent,
+    CandidateSelector, ComponentLockIdentity, NixSourceAttestation, ReleaseTrainError,
+    ReleaseTrainIntent, ReleaseTrainName, TrainComponent,
 };
 use synchronizer::types::{BranchName, BuilderHost, ComponentName, NarHash};
 
@@ -148,14 +148,126 @@ fn live_train_resolution_materializes_scoped_candidate_branches_from_pushed_trut
         .iter()
         .map(|selector| selector.component().clone())
         .collect();
+    let closure = materialized.closure();
+    assert_eq!(
+        closure.components().len(),
+        3,
+        "normal train resolves its closure"
+    );
     let closure = materialized
         .resolve_closure(attestations, locks, members, BTreeMap::new())
-        .expect("materialized candidates emit an immutable closure");
+        .expect("the public closure validator remains available for callers");
     let artifact_directory = tempfile::tempdir().expect("artifact directory");
     let artifacts = closure
         .write_integration_artifacts(artifact_directory.path(), "LiGoldragon")
         .expect("portable Nix artifacts emit");
     let generated_flake = std::fs::read_to_string(artifacts.flake_path()).expect("generated flake");
-    assert!(generated_flake.contains("github:LiGoldragon/nota/"));
+    assert!(generated_flake.contains("nota.url = \"github:LiGoldragon/nota/"));
+    assert!(!generated_flake.contains("narHash"));
     assert!(!generated_flake.contains("path:"));
+}
+
+#[test]
+fn normal_train_records_the_observed_remote_base_and_rejects_a_mismatch() {
+    let nota = Rc::new(FixtureRepository::new(
+        "nota",
+        revision("nota-main"),
+        BTreeMap::new(),
+    ));
+    let config = standard_config(vec![Component::new(
+        TrainRunFixture::component("nota"),
+        ComponentCheckout::AtRoot,
+    )]);
+    let intent = ReleaseTrainIntent::new(
+        ReleaseTrainName::new("base-proof"),
+        vec![TrainComponent::new(
+            TrainRunFixture::component("nota"),
+            CandidateSelector::Mainline,
+            revision("unexpected-base"),
+        )],
+        Vec::new(),
+    );
+    let result = SynchronizerRun::release_train(
+        config,
+        intent,
+        RunBoundaries {
+            repository_opener: Box::new(FixtureOpener {
+                repositories: BTreeMap::from([(TrainRunFixture::component("nota"), nota)]),
+            }),
+            nar_hash_source: Box::new(FixturePrefetch),
+            builder_host_resolver: Box::new(FixtureBuilderHost {
+                host: BuilderHost::new("prometheus"),
+            }),
+            verifier_source: Box::new(FixtureVerifierSource {
+                verified: Rc::new(RefCell::new(Vec::new())),
+            }),
+            lock_resolver: Box::new(UnreachableLockResolver {
+                witness: "base validation occurs before lock resolution",
+            }),
+        },
+    )
+    .execute();
+    assert!(
+        matches!(
+            result,
+            Err(ReleaseTrainError::ExpectedBaseMoved { component, expected, observed })
+                if component == TrainRunFixture::component("nota")
+                    && expected == revision("unexpected-base")
+                    && observed == revision("nota-main")
+        ),
+        "the observed field must be the independently queried remote main tip"
+    );
+}
+
+#[test]
+fn normal_train_rejects_an_owned_dependency_omitted_from_the_intent() {
+    let consumer = Rc::new(FixtureRepository::new(
+        "consumer",
+        revision("consumer-main"),
+        BTreeMap::from([(
+            "Cargo.toml".to_string(),
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n\n[dependencies]\nunplanned = { git = \"https://github.com/LiGoldragon/unplanned.git\", branch = \"main\" }\n".to_string(),
+        ), (
+            "Cargo.lock".to_string(),
+            format!("version = 4\n\n[[package]]\nname = \"unplanned\"\nversion = \"0.1.0\"\nsource = \"git+https://github.com/LiGoldragon/unplanned.git?branch=main#{}\"\n", revision("unplanned-main").as_str()),
+        )]),
+    ));
+    let config = standard_config(vec![Component::new(
+        TrainRunFixture::component("consumer"),
+        ComponentCheckout::AtRoot,
+    )]);
+    let intent = ReleaseTrainIntent::new(
+        ReleaseTrainName::new("undeclared-proof"),
+        vec![TrainComponent::new(
+            TrainRunFixture::component("consumer"),
+            CandidateSelector::Mainline,
+            revision("consumer-main"),
+        )],
+        Vec::new(),
+    );
+    let result = SynchronizerRun::release_train(
+        config,
+        intent,
+        RunBoundaries {
+            repository_opener: Box::new(FixtureOpener {
+                repositories: BTreeMap::from([(TrainRunFixture::component("consumer"), consumer)]),
+            }),
+            nar_hash_source: Box::new(FixturePrefetch),
+            builder_host_resolver: Box::new(FixtureBuilderHost {
+                host: BuilderHost::new("prometheus"),
+            }),
+            verifier_source: Box::new(FixtureVerifierSource {
+                verified: Rc::new(RefCell::new(Vec::new())),
+            }),
+            lock_resolver: Box::new(UnreachableLockResolver {
+                witness: "the isolated consumer has no configured producer",
+            }),
+        },
+    )
+    .execute();
+    assert!(matches!(
+        result,
+        Err(ReleaseTrainError::UndeclaredInternalEdge(component))
+            if component == ComponentName::new("unplanned")
+    ));
 }

@@ -196,6 +196,55 @@ impl DependencyGraph {
         &self.edges
     }
 
+    /// Every owned repository identity observed in selected train manifests,
+    /// including one that was omitted from the operational configuration.
+    /// Release-train membership validates this set before candidates become a
+    /// closure, so authored membership can never hide an internal edge.
+    pub fn owned_component_identities(
+        owner: &str,
+        manifests: &[ComponentManifests],
+    ) -> Result<BTreeSet<ComponentName>, Error> {
+        let mut identities = manifests
+            .iter()
+            .map(|manifest| manifest.component().clone())
+            .collect::<BTreeSet<_>>();
+        for manifest in manifests {
+            if let Some(cargo) = manifest.cargo() {
+                for (_, source) in cargo.manifest().git_dependencies() {
+                    if let Ok(identity) = source.url().repository_identity()
+                        && identity.owner == owner
+                    {
+                        identities.insert(identity.repository);
+                    }
+                }
+                for (_, pin) in cargo.lock().git_packages()? {
+                    if let Ok(identity) = pin.url().repository_identity()
+                        && identity.owner == owner
+                    {
+                        identities.insert(identity.repository);
+                    }
+                }
+            }
+            if let Some(flake) = manifest.flake() {
+                for occurrence in flake.manifest().pinned_inputs() {
+                    if let Some((input_owner, repository)) = occurrence.url().github_identity()
+                        && input_owner == owner
+                    {
+                        identities.insert(repository.clone());
+                    }
+                }
+                for (_, locked) in flake.lock().github_inputs() {
+                    if locked.owner() == Some(owner)
+                        && let Some(repository) = locked.component_name()
+                    {
+                        identities.insert(repository);
+                    }
+                }
+            }
+        }
+        Ok(identities)
+    }
+
     /// All edges whose consumer is `consumer`.
     pub fn dependencies_of(&self, consumer: &ComponentName) -> Vec<&DependencyEdge> {
         self.edges

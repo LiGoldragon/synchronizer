@@ -32,9 +32,13 @@ Entrypoint:
 - `cargo run --example validate -- <configuration.nota>` — decode-only
   config check; performs no git, nix, or network operation.
 - `synchronizer release-train <configuration.nota> <release-train.nota>` —
-  resolve pushed train selectors, materialize only `train/<name>` candidates,
-  cascade per-component Cargo/flake locks, and invoke the ordinary verification
-  gate; never merges or writes mainline.
+  resolve pushed train selectors, independently observe every selected
+  repository's mainline base, discover and validate the resulting topology,
+  materialize only `train/<name>` candidates, cascade per-component
+  Cargo/flake locks, validate the immutable closure, and write
+  `release-train.lock.json` plus `flake.nix` beside the intent (in its
+  extensionless directory). It then invokes the ordinary verification gate;
+  it never merges or writes mainline.
 
 ## Epic release trains
 
@@ -47,8 +51,9 @@ only when their exact immutable commit is explicitly admitted.
 
 The typed `release_train` module emits a domain-separated closure identity,
 canonical `release-train.lock.json`, component-local lock identities, and an
-integration flake that contains only `github:<owner>/<repo>/<commit>` plus
-`narHash` sources. The source/vendor seam is data-only until measured cache
+integration flake whose generated `flake.lock` records contain only exact
+GitHub owner/repository/revision plus `narHash` sources. The hash is lock
+evidence, never an invalid flake-input attribute. The source/vendor seam is data-only until measured cache
 reuse justifies a separate immutable index. See `release-trains/README.md` and
 `ARCHITECTURE.md` §15.
 

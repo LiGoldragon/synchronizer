@@ -319,6 +319,14 @@ impl PrefetchedSource {
             last_modified,
         }
     }
+
+    pub fn nar_hash(&self) -> &NarHash {
+        &self.nar_hash
+    }
+
+    pub fn last_modified(&self) -> u64 {
+        self.last_modified
+    }
 }
 
 /// The narHash boundary. The single external-command dependency of the

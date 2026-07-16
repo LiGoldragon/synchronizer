@@ -11,10 +11,13 @@ use blake3::Hasher;
 use nota::{NotaDecode, NotaEncode};
 use serde::Serialize;
 
+use crate::component_manifests::ComponentManifests;
 use crate::configuration::SynchronizerConfig;
 use crate::driver::{BaseSelection, RunBoundaries, SynchronizerRun};
+use crate::flake_lock::PinnedFlakeReference;
 use crate::git_repository::{CommitMessage, ComponentRepository};
 use crate::report::Action;
+use crate::topology::DependencyGraph;
 use crate::types::{BranchName, CommitIdentifier, ComponentName, NarHash};
 
 /// A durable name for one release train.
@@ -204,6 +207,7 @@ pub struct NixSourceAttestation {
     component: ComponentName,
     commit: CommitIdentifier,
     nar_hash: NarHash,
+    last_modified: u64,
 }
 
 impl NixSourceAttestation {
@@ -212,7 +216,13 @@ impl NixSourceAttestation {
             component,
             commit,
             nar_hash,
+            last_modified: 0,
         }
+    }
+
+    pub fn with_last_modified(mut self, last_modified: u64) -> Self {
+        self.last_modified = last_modified;
+        self
     }
 
     pub fn component(&self) -> &ComponentName {
@@ -225,6 +235,10 @@ impl NixSourceAttestation {
 
     pub fn nar_hash(&self) -> &NarHash {
         &self.nar_hash
+    }
+
+    pub fn last_modified(&self) -> u64 {
+        self.last_modified
     }
 }
 
@@ -461,29 +475,54 @@ impl ResolvedReleaseTrain {
         serde_json::to_string(self).map_err(|error| ReleaseTrainError::Json(error.to_string()))
     }
 
-    /// A portable integration flake which fetches only commit/narHash pairs.
+    /// A portable integration flake. Its source hashes belong in the emitted
+    /// `flake.lock`, not beside `inputs.<name>.url`; Nix validates the locked
+    /// fixed source before evaluating that component's own flake.
     pub fn to_integration_flake(&self, owner: &str) -> String {
         let inputs = self
             .attestations
             .iter()
             .map(|source| {
                 format!(
-                    "    {} = {{ url = \"github:{}/{}/{}\"; narHash = \"{}\"; }};",
+                    "    {}.url = \"github:{}/{}/{}\";",
                     source.component().as_str().replace('-', "_"),
                     owner,
                     source.component().as_str(),
                     source.commit().as_str(),
-                    source.nar_hash().as_str(),
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "{{\n  description = \"release train {} ({})\";\n  inputs = {{\n{}\n  }};\n  outputs = inputs: {{\n    releaseTrain = builtins.fromJSON (builtins.readFile ./release-train.lock.json);\n  }};\n}}\n",
+            "{{\n  description = \"release train {} ({})\";\n  inputs = {{\n{}\n  }};\n  outputs = inputs:\n    let\n      systems = [ \"aarch64-darwin\" \"aarch64-linux\" \"x86_64-darwin\" \"x86_64-linux\" ];\n      releaseTrain = builtins.fromJSON (builtins.readFile ./release-train.lock.json);\n      components = builtins.removeAttrs inputs [ \"self\" ];\n      componentPackages = system: builtins.mapAttrs (_: component: component.packages.${{system}}.default) components;\n      perSystem = builtins.listToAttrs (map (system: {{ name = system; value = componentPackages system; }}) systems);\n    in {{\n      inherit releaseTrain;\n      packages = perSystem;\n      checks = perSystem;\n    }};\n}}\n",
             self.name.as_str(),
             self.identity,
             inputs
         )
+    }
+
+    /// A Nix flake lock is the authoritative placement of fixed-source hashes
+    /// for the generated integration flake.
+    pub fn to_integration_flake_lock(&self, owner: &str) -> Result<String, ReleaseTrainError> {
+        let mut nodes = serde_json::Map::new();
+        let mut root_inputs = serde_json::Map::new();
+        for source in &self.attestations {
+            let name = source.component().as_str().replace('-', "_");
+            root_inputs.insert(name.clone(), serde_json::Value::String(name.clone()));
+            nodes.insert(name, serde_json::json!({
+                "locked": { "lastModified": source.last_modified(), "narHash": source.nar_hash().as_str(), "owner": owner, "repo": source.component().as_str(), "rev": source.commit().as_str(), "type": "github" },
+                "original": { "owner": owner, "repo": source.component().as_str(), "type": "github" }
+            }));
+        }
+        nodes.insert(
+            "root".to_string(),
+            serde_json::json!({ "inputs": root_inputs }),
+        );
+        serde_json::to_string_pretty(
+            &serde_json::json!({ "nodes": nodes, "root": "root", "version": 7 }),
+        )
+        .map(|text| format!("{text}\n"))
+        .map_err(|error| ReleaseTrainError::Json(error.to_string()))
     }
 
     /// Emit the P2 portable integration inputs. The files contain no local
@@ -497,11 +536,18 @@ impl ResolvedReleaseTrain {
             .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
         let json_path = output_directory.join("release-train.lock.json");
         let flake_path = output_directory.join("flake.nix");
+        let flake_lock_path = output_directory.join("flake.lock");
         std::fs::write(&json_path, self.to_canonical_json()?)
             .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
         std::fs::write(&flake_path, self.to_integration_flake(owner))
             .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
-        Ok(ReleaseTrainArtifacts::new(json_path, flake_path))
+        std::fs::write(&flake_lock_path, self.to_integration_flake_lock(owner)?)
+            .map_err(|error| ReleaseTrainError::Io(error.to_string()))?;
+        Ok(ReleaseTrainArtifacts::new(
+            json_path,
+            flake_path,
+            flake_lock_path,
+        ))
     }
 
     fn payload_identity(&self) -> String {
@@ -520,13 +566,15 @@ impl ResolvedReleaseTrain {
 pub struct ReleaseTrainArtifacts {
     json_path: PathBuf,
     flake_path: PathBuf,
+    flake_lock_path: PathBuf,
 }
 
 impl ReleaseTrainArtifacts {
-    pub fn new(json_path: PathBuf, flake_path: PathBuf) -> Self {
+    pub fn new(json_path: PathBuf, flake_path: PathBuf, flake_lock_path: PathBuf) -> Self {
         Self {
             json_path,
             flake_path,
+            flake_lock_path,
         }
     }
 
@@ -536,6 +584,10 @@ impl ReleaseTrainArtifacts {
 
     pub fn flake_path(&self) -> &Path {
         &self.flake_path
+    }
+
+    pub fn flake_lock_path(&self) -> &Path {
+        &self.flake_lock_path
     }
 }
 
@@ -593,7 +645,7 @@ impl ReleaseTrainRun {
 
     /// Resolve selectors, prove expected bases, and materialize isolated train
     /// branches before cascading ordinary per-consumer Cargo/flake lock edits.
-    pub fn execute(self) -> Result<MaterializedReleaseTrain, ReleaseTrainError> {
+    pub fn execute(mut self) -> Result<MaterializedReleaseTrain, ReleaseTrainError> {
         let candidate_branch = self.intent.name().candidate_branch();
         let component_names = self
             .intent
@@ -603,12 +655,12 @@ impl ReleaseTrainRun {
             .collect::<Vec<_>>();
         let mut selectors = Vec::new();
         for component in self.intent.components() {
-            let selected = self.resolve_selector(component)?;
+            let (selected, observed_base) = self.resolve_selector(component)?;
             let candidate = self.materialize_candidate(component, &selected, &candidate_branch)?;
             selectors.push(ResolvedSelector::new(
                 component.component().clone(),
                 selected,
-                component.expected_base().clone(),
+                observed_base,
                 candidate,
             ));
         }
@@ -616,10 +668,11 @@ impl ReleaseTrainRun {
             .config
             .release_train_view(&component_names, candidate_branch.clone())
             .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
-        let report = SynchronizerRun::with_boundaries(train_config, self.boundaries)
+        let (report, boundaries) = SynchronizerRun::with_boundaries(train_config, self.boundaries)
             .with_base_selection(BaseSelection::StagedCascade)
-            .execute()
+            .execute_with_boundaries()
             .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        self.boundaries = boundaries;
         for level in report.levels() {
             for outcome in level.repositories() {
                 if let Action::Bumped(bump) = outcome.action()
@@ -631,18 +684,20 @@ impl ReleaseTrainRun {
                 }
             }
         }
+        let closure = self.resolve_candidate_closure(&selectors)?;
         Ok(MaterializedReleaseTrain {
             intent: self.intent,
             candidate_branch,
             selectors,
             report,
+            closure,
         })
     }
 
     fn resolve_selector(
         &self,
         component: &TrainComponent,
-    ) -> Result<CommitIdentifier, ReleaseTrainError> {
+    ) -> Result<(CommitIdentifier, CommitIdentifier), ReleaseTrainError> {
         let repository = self.open_component(component.component())?;
         let selected = match component.selector() {
             CandidateSelector::Mainline => repository
@@ -657,6 +712,19 @@ impl ReleaseTrainRun {
                 })?,
             CandidateSelector::ExactCommit(commit) => commit.clone(),
         };
+        // Observe the remote mainline independently.  This is the value the
+        // closure records as its actual base; it must never be reconstructed
+        // from the authored expectation.
+        let observed_base = repository
+            .remote_main_tip()
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        if &observed_base != component.expected_base() {
+            return Err(ReleaseTrainError::ExpectedBaseMoved {
+                component: component.component().clone(),
+                expected: component.expected_base().clone(),
+                observed: observed_base,
+            });
+        }
         repository
             .fetch(&selected)
             .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
@@ -670,7 +738,81 @@ impl ReleaseTrainRun {
                 observed: selected,
             });
         }
-        Ok(selected)
+        Ok((selected, observed_base))
+    }
+
+    /// Gather the evidence from the actual candidate commits after the cascade
+    /// has finished, then make every closure validator part of the normal path.
+    fn resolve_candidate_closure(
+        &self,
+        selectors: &[ResolvedSelector],
+    ) -> Result<ResolvedReleaseTrain, ReleaseTrainError> {
+        let mut manifests = Vec::new();
+        let mut attestations = Vec::new();
+        let mut locks = Vec::new();
+        for selector in selectors {
+            let repository = self.open_component(selector.component())?;
+            repository
+                .fetch(selector.candidate())
+                .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+            let manifests_at_candidate = ComponentManifests::load_at(
+                repository.as_ref(),
+                selector.component(),
+                selector.candidate().clone(),
+            )
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+            let cargo_lock = manifests_at_candidate
+                .cargo()
+                .map(|surface| surface.lock().to_toml_text().as_str().to_string())
+                .unwrap_or_default();
+            let flake_lock = manifests_at_candidate
+                .flake()
+                .and_then(|surface| surface.lock().to_json_text().ok())
+                .unwrap_or_default();
+            locks.push(ComponentLockIdentity::from_text(
+                selector.component().clone(),
+                &cargo_lock,
+                &flake_lock,
+            ));
+            manifests.push(manifests_at_candidate);
+            let reference = PinnedFlakeReference::new(
+                self.config.forge().owner().as_str().to_string(),
+                selector.component().clone(),
+                selector.candidate().clone(),
+            );
+            let prefetched = self
+                .boundaries
+                .nar_hash_source
+                .prefetch(&reference)
+                .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+            attestations.push(
+                NixSourceAttestation::new(
+                    selector.component().clone(),
+                    selector.candidate().clone(),
+                    prefetched.nar_hash().clone(),
+                )
+                .with_last_modified(prefetched.last_modified()),
+            );
+        }
+        // Run the ordinary configured discovery as well as the release-train
+        // owned-identity scan.  The latter deliberately retains an owned edge
+        // even when its producer was omitted from configuration.
+        DependencyGraph::discover(&self.config, &manifests)
+            .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        let discovered = DependencyGraph::owned_component_identities(
+            self.config.forge().owner().as_str(),
+            &manifests,
+        )
+        .map_err(|error| ReleaseTrainError::Infrastructure(error.to_string()))?;
+        ReleaseTrainResolution::new(
+            self.intent.clone(),
+            selectors.to_vec(),
+            attestations,
+            locks,
+            discovered,
+            BTreeMap::new(),
+        )
+        .resolve()
     }
 
     fn materialize_candidate(
@@ -720,6 +862,7 @@ pub struct MaterializedReleaseTrain {
     candidate_branch: BranchName,
     selectors: Vec<ResolvedSelector>,
     report: crate::report::SynchronizerReport,
+    closure: ResolvedReleaseTrain,
 }
 
 impl MaterializedReleaseTrain {
@@ -733,6 +876,21 @@ impl MaterializedReleaseTrain {
 
     pub fn report(&self) -> &crate::report::SynchronizerReport {
         &self.report
+    }
+
+    /// The validated closure generated by the normal release-train run.
+    pub fn closure(&self) -> &ResolvedReleaseTrain {
+        &self.closure
+    }
+
+    /// Persist the generated JSON lock and integration flake chosen by the CLI.
+    pub fn write_integration_artifacts(
+        &self,
+        output_directory: &Path,
+        owner: &str,
+    ) -> Result<ReleaseTrainArtifacts, ReleaseTrainError> {
+        self.closure
+            .write_integration_artifacts(output_directory, owner)
     }
 
     pub fn resolve_closure(

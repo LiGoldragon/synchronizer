@@ -271,6 +271,17 @@ impl SynchronizerRun {
     /// including every failed bump, push, and verify — lands inside the
     /// report.
     pub fn execute(self) -> Result<SynchronizerReport, Error> {
+        self.execute_with_boundaries().map(|(report, _)| report)
+    }
+
+    /// Run the ordinary cascade while returning its injected boundaries to a
+    /// release-train caller that must inspect the final candidate commits.
+    pub fn execute_with_boundaries(self) -> Result<(SynchronizerReport, RunBoundaries), Error> {
+        let report = self.execute_ref()?;
+        Ok((report, self.boundaries))
+    }
+
+    fn execute_ref(&self) -> Result<SynchronizerReport, Error> {
         let started_at = Timestamp::now();
         let mut failures: Vec<Failure> = Vec::new();
         let mut unprocessable: Vec<ComponentName> = Vec::new();
